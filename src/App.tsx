@@ -1,0 +1,608 @@
+import React, { useState, useMemo } from 'react';
+import { 
+  INITIAL_USERS, 
+  INITIAL_TENANTS, 
+  INITIAL_FOLDERS, 
+  INITIAL_DOCUMENTS, 
+  INITIAL_AUDIT_LOGS, 
+  PLANS 
+} from './services/mockData';
+import { 
+  User, 
+  Tenant, 
+  Folder, 
+  DocumentItem, 
+  DocumentVersion, 
+  PlanType, 
+  AuditLogItem 
+} from './types';
+import { Header } from './components/Header';
+import { Sidebar, NavTab } from './components/Sidebar';
+import { FileExplorer } from './components/FileExplorer';
+import { FilePreviewModal } from './components/FilePreviewModal';
+import { FileUploadModal } from './components/FileUploadModal';
+import { ShareModal } from './components/ShareModal';
+import { VersionsModal } from './components/VersionsModal';
+import { FolderModal } from './components/FolderModal';
+import { StorageGauge } from './components/StorageGauge';
+import { AdminConsole } from './components/AdminConsole';
+import { ArchitectureModal } from './components/ArchitectureModal';
+import { SettingsModal } from './components/SettingsModal';
+import { AuthModal } from './components/AuthModal';
+import { 
+  FileText, 
+  Folder as FolderIcon, 
+  HardDrive, 
+  ShieldCheck, 
+  Clock, 
+  Star, 
+  UploadCloud, 
+  Search,
+  CheckCircle2
+} from 'lucide-react';
+import { formatBytes } from './services/crypto';
+
+export default function App() {
+  // --- Global Application State ---
+  const [users, setUsers] = useState<User[]>(INITIAL_USERS);
+  const [currentUser, setCurrentUser] = useState<User>(INITIAL_USERS[0]); // Alice Dupont
+  const [tenants, setTenants] = useState<Tenant[]>(INITIAL_TENANTS);
+  const [currentTenantId, setCurrentTenantId] = useState<string>('tnt-alice-main');
+  const [folders, setFolders] = useState<Folder[]>(INITIAL_FOLDERS);
+  const [documents, setDocuments] = useState<DocumentItem[]>(INITIAL_DOCUMENTS);
+  const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>(INITIAL_AUDIT_LOGS);
+
+  // Navigation & View state
+  const [currentTab, setCurrentTab] = useState<NavTab>('dashboard');
+  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+
+  // Modals state
+  const [isUploadOpen, setIsUploadOpen] = useState(false);
+  const [previewDoc, setPreviewDoc] = useState<DocumentItem | null>(null);
+  const [shareDoc, setShareDoc] = useState<DocumentItem | null>(null);
+  const [versionsDoc, setVersionsDoc] = useState<DocumentItem | null>(null);
+  const [folderModal, setFolderModal] = useState<{
+    isOpen: boolean;
+    folderToEdit: Folder | null;
+    parentFolder: Folder | null;
+  }>({ isOpen: false, folderToEdit: null, parentFolder: null });
+  const [isArchitectureOpen, setIsArchitectureOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
+
+  // Resolved active tenant & plan
+  const currentTenant = useMemo(() => {
+    return tenants.find(t => t.id === currentTenantId) || tenants[0];
+  }, [tenants, currentTenantId]);
+
+  const currentPlan = useMemo(() => {
+    return PLANS[currentTenant.planId] || PLANS.FREE;
+  }, [currentTenant.planId]);
+
+  const userTenants = useMemo(() => {
+    return tenants.filter(t => t.ownerId === currentUser.id || currentUser.isSuperuser);
+  }, [tenants, currentUser]);
+
+  // Active folder object
+  const currentFolder = useMemo(() => {
+    if (!currentFolderId) return null;
+    return folders.find(f => f.id === currentFolderId) || null;
+  }, [folders, currentFolderId]);
+
+  // Breadcrumbs
+  const breadcrumbs = useMemo(() => {
+    const crumbs: Folder[] = [];
+    let cur = currentFolder;
+    while (cur) {
+      crumbs.unshift(cur);
+      cur = cur.parentId ? folders.find(f => f.id === cur?.parentId) || null : null;
+    }
+    return crumbs;
+  }, [currentFolder, folders]);
+
+  // Filtered documents & folders scoped to active tenant
+  const tenantDocs = useMemo(() => {
+    return documents.filter(d => d.tenantId === currentTenant.id);
+  }, [documents, currentTenant.id]);
+
+  const tenantFolders = useMemo(() => {
+    return folders.filter(f => f.tenantId === currentTenant.id);
+  }, [folders, currentTenant.id]);
+
+  // Trashed items count
+  const trashedCount = useMemo(() => {
+    return tenantDocs.filter(d => d.isTrashed).length + tenantFolders.filter(f => f.isTrashed).length;
+  }, [tenantDocs, tenantFolders]);
+
+  // Filter items based on active Tab
+  const displayedItems = useMemo(() => {
+    let docs = tenantDocs;
+    let flds = tenantFolders;
+
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      docs = docs.filter(d => 
+        !d.isTrashed && (
+          d.originalName.toLowerCase().includes(q) ||
+          d.extension.toLowerCase().includes(q) ||
+          d.sha256Hash.toLowerCase().includes(q) ||
+          d.mimeType.toLowerCase().includes(q)
+        )
+      );
+      flds = flds.filter(f => !f.isTrashed && f.name.toLowerCase().includes(q));
+      return { docs, flds };
+    }
+
+    switch (currentTab) {
+      case 'dashboard':
+        // Top 8 recent files
+        docs = docs.filter(d => !d.isTrashed).slice(0, 8);
+        flds = flds.filter(f => !f.isTrashed && f.parentId === null);
+        break;
+
+      case 'documents':
+        docs = docs.filter(d => !d.isTrashed && d.folderId === currentFolderId);
+        flds = flds.filter(f => !f.isTrashed && f.parentId === currentFolderId);
+        break;
+
+      case 'folders':
+        docs = docs.filter(d => !d.isTrashed && d.folderId === currentFolderId);
+        flds = flds.filter(f => !f.isTrashed && f.parentId === currentFolderId);
+        break;
+
+      case 'favorites':
+        docs = docs.filter(d => !d.isTrashed && d.isFavorite);
+        flds = flds.filter(f => !f.isTrashed && f.isFavorite);
+        break;
+
+      case 'recents':
+        docs = [...docs.filter(d => !d.isTrashed)].sort(
+          (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+        );
+        flds = [];
+        break;
+
+      case 'trash':
+        docs = docs.filter(d => d.isTrashed);
+        flds = flds.filter(f => f.isTrashed);
+        break;
+
+      case 'shared-with-me':
+      case 'shared-by-me':
+        // Show files with active shares
+        docs = docs.filter(d => !d.isTrashed).slice(0, 3);
+        flds = [];
+        break;
+
+      default:
+        docs = docs.filter(d => !d.isTrashed && d.folderId === currentFolderId);
+        flds = flds.filter(f => !f.isTrashed && f.parentId === currentFolderId);
+        break;
+    }
+
+    return { docs, flds };
+  }, [tenantDocs, tenantFolders, currentTab, currentFolderId, searchQuery]);
+
+  // --- Handlers ---
+  const handleSelectTenant = (tenantId: string) => {
+    setCurrentTenantId(tenantId);
+    setCurrentFolderId(null);
+    logAction('TENANT_SWITCH_RLS', 'TENANT', tenantId, `Basculement vers l'espace ${tenantId}`);
+  };
+
+  const handleSwitchUser = (userId: string) => {
+    const user = users.find(u => u.id === userId);
+    if (!user) return;
+    setCurrentUser(user);
+
+    // Auto-select user's owned tenant
+    const userTenant = tenants.find(t => t.ownerId === user.id) || tenants[0];
+    setCurrentTenantId(userTenant.id);
+    setCurrentFolderId(null);
+    logAction('AUTH_USER_SWITCH', 'AUTH', user.email, `Changement d'utilisateur : ${user.fullName}`);
+  };
+
+  const handleUploadSuccess = (newDoc: DocumentItem) => {
+    setDocuments(prev => [newDoc, ...prev]);
+
+    // Update tenant storage usage
+    setTenants(prev => prev.map(t => {
+      if (t.id === currentTenant.id) {
+        return {
+          ...t,
+          usedBytes: (t.usedBytes || 0) + newDoc.sizeBytes,
+          documentCount: (t.documentCount || 0) + 1
+        };
+      }
+      return t;
+    }));
+
+    logAction('DOC_UPLOAD_VERIFIED', 'DOCUMENT', newDoc.originalName, `Fichier importé avec succès (${formatBytes(newDoc.sizeBytes)})`);
+  };
+
+  const handleSaveFolder = (name: string, color: string) => {
+    if (folderModal.folderToEdit) {
+      // Rename folder
+      setFolders(prev => prev.map(f => {
+        if (f.id === folderModal.folderToEdit?.id) {
+          return { ...f, name, color, updatedAt: new Date().toISOString() };
+        }
+        return f;
+      }));
+      logAction('FOLDER_RENAME', 'FOLDER', name, `Dossier renommé en "${name}"`);
+    } else {
+      // Create folder
+      const newFolder: Folder = {
+        id: `fld-${crypto.randomUUID()}`,
+        tenantId: currentTenant.id,
+        parentId: currentFolderId,
+        name,
+        color,
+        isFavorite: false,
+        isTrashed: false,
+        createdBy: currentUser.id,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      setFolders(prev => [...prev, newFolder]);
+      logAction('FOLDER_CREATE', 'FOLDER', name, `Dossier "${name}" créé dans l'espace ${currentTenant.name}`);
+    }
+  };
+
+  const handleToggleFavoriteDoc = (docId: string) => {
+    setDocuments(prev => prev.map(d => {
+      if (d.id === docId) {
+        return { ...d, isFavorite: !d.isFavorite };
+      }
+      return d;
+    }));
+  };
+
+  const handleTrashDoc = (docId: string) => {
+    setDocuments(prev => prev.map(d => {
+      if (d.id === docId) {
+        return { ...d, isTrashed: true, trashedAt: new Date().toISOString() };
+      }
+      return d;
+    }));
+    logAction('DOC_TRASH', 'DOCUMENT', docId, 'Fichier déplacé vers la corbeille');
+  };
+
+  const handleRestoreDoc = (docId: string) => {
+    setDocuments(prev => prev.map(d => {
+      if (d.id === docId) {
+        return { ...d, isTrashed: false, trashedAt: undefined };
+      }
+      return d;
+    }));
+    logAction('DOC_RESTORE', 'DOCUMENT', docId, 'Fichier restauré de la corbeille');
+  };
+
+  const handlePurgeDoc = (docId: string) => {
+    const docToDelete = documents.find(d => d.id === docId);
+    if (docToDelete) {
+      setDocuments(prev => prev.filter(d => d.id !== docId));
+      // Reclaim tenant storage quota
+      setTenants(prev => prev.map(t => {
+        if (t.id === docToDelete.tenantId) {
+          return {
+            ...t,
+            usedBytes: Math.max(0, (t.usedBytes || 0) - docToDelete.sizeBytes),
+            documentCount: Math.max(0, (t.documentCount || 0) - 1)
+          };
+        }
+        return t;
+      }));
+      logAction('DOC_PERMANENT_PURGE', 'DOCUMENT', docToDelete.originalName, 'Fichier définitivement purgé du stockage MinIO');
+    }
+  };
+
+  const handleRenameDoc = (doc: DocumentItem) => {
+    const newName = window.prompt('Nouveau nom du document :', doc.originalName);
+    if (!newName || !newName.trim()) return;
+    setDocuments(prev => prev.map(d => {
+      if (d.id === doc.id) {
+        return { ...d, originalName: newName.trim(), updatedAt: new Date().toISOString() };
+      }
+      return d;
+    }));
+    logAction('DOC_RENAME', 'DOCUMENT', newName.trim(), `Fichier renommé`);
+  };
+
+  const handleTrashFolder = (folderId: string) => {
+    setFolders(prev => prev.map(f => {
+      if (f.id === folderId) {
+        return { ...f, isTrashed: true, trashedAt: new Date().toISOString() };
+      }
+      return f;
+    }));
+  };
+
+  const handleRestoreVersion = (doc: DocumentItem, version: DocumentVersion) => {
+    setDocuments(prev => prev.map(d => {
+      if (d.id === doc.id) {
+        return {
+          ...d,
+          sizeBytes: version.sizeBytes,
+          sha256Hash: version.sha256Hash,
+          mimeType: version.mimeType,
+          updatedAt: new Date().toISOString()
+        };
+      }
+      return d;
+    }));
+    setVersionsDoc(null);
+    logAction('DOC_VERSION_RESTORE', 'DOCUMENT', doc.originalName, `Restauration de la version ${version.versionNumber}`);
+  };
+
+  const handleUpgradePlan = (planId: PlanType) => {
+    setTenants(prev => prev.map(t => {
+      if (t.id === currentTenant.id) {
+        return { ...t, planId };
+      }
+      return t;
+    }));
+    logAction('PLAN_UPGRADE', 'TENANT', planId, `Mise à niveau vers le forfait ${planId}`);
+    alert(`Votre espace est désormais associé au forfait ${planId} (${formatBytes(PLANS[planId].maxStorageBytes)}) !`);
+  };
+
+  const handleRegister = (fullName: string, email: string) => {
+    const newUser: User = {
+      id: `usr-${crypto.randomUUID()}`,
+      email: email.toLowerCase(),
+      fullName,
+      isActive: true,
+      isVerified: true,
+      isSuperuser: false,
+      createdAt: new Date().toISOString()
+    };
+
+    // Auto-create personal tenant
+    const newTenant: Tenant = {
+      id: `tnt-${crypto.randomUUID()}`,
+      name: `Espace de ${fullName}`,
+      ownerId: newUser.id,
+      planId: 'FREE',
+      role: 'OWNER',
+      isActive: true,
+      createdAt: new Date().toISOString(),
+      usedBytes: 0,
+      reservedBytes: 0,
+      documentCount: 0
+    };
+
+    setUsers(prev => [...prev, newUser]);
+    setTenants(prev => [...prev, newTenant]);
+    setCurrentUser(newUser);
+    setCurrentTenantId(newTenant.id);
+    setIsAuthOpen(false);
+    logAction('AUTH_REGISTER', 'USER', email, `Création du compte et initialisation de l'espace personnel.`);
+  };
+
+  const handleLogin = (email: string) => {
+    const user = users.find(u => u.email.toLowerCase() === email.toLowerCase());
+    if (user) {
+      setCurrentUser(user);
+      const userTenant = tenants.find(t => t.ownerId === user.id) || tenants[0];
+      setCurrentTenantId(userTenant.id);
+      setIsAuthOpen(false);
+      logAction('AUTH_LOGIN', 'USER', email, `Connexion réussie.`);
+    } else {
+      alert("Identifiants non reconnus. Veuillez vérifier l'adresse saisie.");
+    }
+  };
+
+  const logAction = (action: string, resourceType: any, resourceName: string, details: string) => {
+    const log: AuditLogItem = {
+      id: `log-${crypto.randomUUID()}`,
+      tenantId: currentTenant.id,
+      userId: currentUser.id,
+      userEmail: currentUser.email,
+      action,
+      resourceType,
+      resourceName,
+      ipAddress: '192.168.1.45',
+      userAgent: 'Mozilla/5.0 (Debian 12)',
+      timestamp: new Date().toISOString(),
+      status: 'SUCCESS'
+    };
+    setAuditLogs(prev => [log, ...prev]);
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans select-none antialiased">
+      {/* Top Header */}
+      <Header
+        currentUser={currentUser}
+        currentTenant={currentTenant}
+        userTenants={userTenants}
+        currentPlan={currentPlan}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+        onSelectTenant={handleSelectTenant}
+        onSwitchUser={handleSwitchUser}
+        onOpenArchitecture={() => setIsArchitectureOpen(true)}
+        onOpenUpload={() => setIsUploadOpen(true)}
+        onLogout={() => setIsAuthOpen(true)}
+        allUsers={users}
+      />
+
+      {/* Main Container */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Sidebar */}
+        <Sidebar
+          currentTab={currentTab}
+          onTabChange={(tab) => {
+            setCurrentTab(tab);
+            if (tab === 'settings') setIsSettingsOpen(true);
+            if (tab !== 'documents' && tab !== 'folders') setCurrentFolderId(null);
+          }}
+          currentUser={currentUser}
+          currentTenant={currentTenant}
+          currentPlan={currentPlan}
+          onOpenUpload={() => setIsUploadOpen(true)}
+          onOpenNewFolder={() => setFolderModal({ isOpen: true, folderToEdit: null, parentFolder: currentFolder })}
+          trashedCount={trashedCount}
+        />
+
+        {/* Dynamic Center Stage */}
+        <main className="flex-1 flex flex-col overflow-hidden bg-slate-950/60">
+          {/* Dashboard Summary Top Banner (when in dashboard tab) */}
+          {currentTab === 'dashboard' && !searchQuery && (
+            <div className="p-6 pb-2 border-b border-slate-800/80 bg-slate-900/40">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex items-center space-x-3.5">
+                  <div className="p-3 rounded-xl bg-blue-500/10 text-blue-400">
+                    <FileText className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-xl font-bold text-white">{tenantDocs.length}</div>
+                    <div className="text-[11px] text-slate-400">Documents actifs</div>
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex items-center space-x-3.5">
+                  <div className="p-3 rounded-xl bg-purple-500/10 text-purple-400">
+                    <FolderIcon className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-xl font-bold text-white">{tenantFolders.length}</div>
+                    <div className="text-[11px] text-slate-400">Dossiers organisés</div>
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex items-center space-x-3.5">
+                  <div className="p-3 rounded-xl bg-emerald-500/10 text-emerald-400">
+                    <ShieldCheck className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-xl font-bold text-emerald-400">100% Sain</div>
+                    <div className="text-[11px] text-slate-400">Contrôle ClamAV actif</div>
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex items-center space-x-3.5">
+                  <div className="p-3 rounded-xl bg-sky-500/10 text-sky-400">
+                    <HardDrive className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-xl font-bold text-white font-mono">
+                      {formatBytes(currentTenant.usedBytes || 0)}
+                    </div>
+                    <div className="text-[11px] text-slate-400">
+                      sur {formatBytes(currentPlan.maxStorageBytes)}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Conditional Views */}
+          {currentTab === 'storage' || currentTab === 'billing' ? (
+            <StorageGauge
+              currentTenant={currentTenant}
+              currentPlan={currentPlan}
+              documents={tenantDocs}
+              onUpgradePlan={handleUpgradePlan}
+            />
+          ) : currentTab === 'admin' && currentUser.isSuperuser ? (
+            <AdminConsole
+              tenants={tenants}
+              users={users}
+              auditLogs={auditLogs}
+            />
+          ) : (
+            <FileExplorer
+              currentFolder={currentFolder}
+              breadcrumbs={breadcrumbs}
+              folders={displayedItems.flds}
+              documents={displayedItems.docs}
+              viewMode={viewMode}
+              onToggleViewMode={() => setViewMode(prev => prev === 'grid' ? 'list' : 'grid')}
+              onNavigateFolder={(fId) => setCurrentFolderId(fId)}
+              onPreviewDocument={(doc) => setPreviewDoc(doc)}
+              onShareDocument={(doc) => setShareDoc(doc)}
+              onViewVersions={(doc) => setVersionsDoc(doc)}
+              onToggleFavoriteDoc={handleToggleFavoriteDoc}
+              onTrashDoc={handleTrashDoc}
+              onRestoreDoc={handleRestoreDoc}
+              onPurgeDoc={handlePurgeDoc}
+              onRenameDoc={handleRenameDoc}
+              onOpenUpload={() => setIsUploadOpen(true)}
+              onOpenNewFolder={() => setFolderModal({ isOpen: true, folderToEdit: null, parentFolder: currentFolder })}
+              onRenameFolder={(f) => setFolderModal({ isOpen: true, folderToEdit: f, parentFolder: currentFolder })}
+              onTrashFolder={handleTrashFolder}
+              isTrashView={currentTab === 'trash'}
+            />
+          )}
+        </main>
+      </div>
+
+      {/* --- Modals & Overlays --- */}
+      <FileUploadModal
+        isOpen={isUploadOpen}
+        onClose={() => setIsUploadOpen(false)}
+        currentTenant={currentTenant}
+        currentPlan={currentPlan}
+        currentFolder={currentFolder}
+        onUploadSuccess={handleUploadSuccess}
+      />
+
+      <FilePreviewModal
+        document={previewDoc}
+        onClose={() => setPreviewDoc(null)}
+        onShare={(doc) => {
+          setPreviewDoc(null);
+          setShareDoc(doc);
+        }}
+      />
+
+      <ShareModal
+        document={shareDoc}
+        onClose={() => setShareDoc(null)}
+      />
+
+      <VersionsModal
+        document={versionsDoc}
+        onClose={() => setVersionsDoc(null)}
+        onRestoreVersion={handleRestoreVersion}
+      />
+
+      <FolderModal
+        isOpen={folderModal.isOpen}
+        onClose={() => setFolderModal({ isOpen: false, folderToEdit: null, parentFolder: null })}
+        folderToEdit={folderModal.folderToEdit}
+        parentFolder={folderModal.parentFolder}
+        onSave={handleSaveFolder}
+      />
+
+      <ArchitectureModal
+        isOpen={isArchitectureOpen}
+        onClose={() => setIsArchitectureOpen(false)}
+      />
+
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        currentUser={currentUser}
+        currentTenant={currentTenant}
+        documents={tenantDocs}
+        onDeleteAccount={() => {
+          alert('Votre compte a été purgé conformément au RGPD.');
+          setIsAuthOpen(true);
+        }}
+      />
+
+      <AuthModal
+        isOpen={isAuthOpen}
+        onClose={() => setIsAuthOpen(false)}
+        onLogin={handleLogin}
+        onRegister={handleRegister}
+        availableUsers={users}
+      />
+    </div>
+  );
+}

@@ -1,0 +1,172 @@
+version: '3.8'
+
+services:
+  # =========================================================================
+  # DocuSpace PostgreSQL Database with Row-Level Security (RLS)
+  # =========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: docuspace-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-docuspace}
+      POSTGRES_USER: ${POSTGRES_USER:-docuspace_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-docuspace_secure_password_change_me}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-docuspace_user} -d ${POSTGRES_DB:-docuspace}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - docuspace-network
+
+  # =========================================================================
+  # MinIO S3-Compatible Object Storage
+  # =========================================================================
+  minio:
+    image: minio/minio:RELEASE.2024-05-10T01-41-38Z
+    container_name: docuspace-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-docuspace_minio_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-docuspace_minio_secret_key_change_me}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - docuspace-network
+
+  # =========================================================================
+  # ClamAV Antivirus Daemon (Fail-closed document scanner)
+  # =========================================================================
+  clamav:
+    image: clamav/clamav:latest
+    container_name: docuspace-clamav
+    restart: unless-stopped
+    volumes:
+      - clamav_db:/var/lib/clamav
+    ports:
+      - "${CLAMAV_PORT:-3310}:3310"
+    healthcheck:
+      test: ["CMD", "clamdscan", "--ping", "10"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+    networks:
+      - docuspace-network
+
+  # =========================================================================
+  # Redis Cache & Background Tasks
+  # =========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: docuspace-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_secure_pass_change_me}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_secure_pass_change_me}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - docuspace-network
+
+  # =========================================================================
+  # DocuSpace Backend API (FastAPI, Python 3.10+, SQLAlchemy 2)
+  # =========================================================================
+  backend:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/backend.Dockerfile
+    container_name: docuspace-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-docuspace_user}:${POSTGRES_PASSWORD:-docuspace_secure_password_change_me}@postgres:5432/${POSTGRES_DB:-docuspace}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-docuspace_minio_admin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-docuspace_minio_secret_key_change_me}
+      MINIO_SECURE: "false"
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secure_pass_change_me}@redis:6379/0
+    volumes:
+      - ./backend:/app/backend
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    networks:
+      - docuspace-network
+
+  # =========================================================================
+  # DocuSpace Frontend (React, TypeScript, Vite, Tailwind CSS)
+  # =========================================================================
+  frontend:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/frontend.Dockerfile
+    container_name: docuspace-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      - VITE_API_URL=http://localhost:${BACKEND_PORT:-8000}/api/v1
+    networks:
+      - docuspace-network
+
+  # =========================================================================
+  # Nginx Reverse Proxy (SSL termination, rate limiting, secure headers)
+  # =========================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: docuspace-nginx
+    restart: unless-stopped
+    depends_on:
+      - frontend
+      - backend
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - nginx_logs:/var/log/nginx
+    networks:
+      - docuspace-network
+
+networks:
+  docuspace-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  minio_data:
+  clamav_db:
+  redis_data:
+  nginx_logs:
