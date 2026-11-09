@@ -1,8 +1,14 @@
 import os
 from typing import List, Optional
-from pydantic_settings import BaseSettings
+try:
+    from pydantic_settings import BaseSettings
+    class BaseConfig(BaseSettings):
+        pass
+except ImportError:
+    class BaseConfig:
+        pass
 
-class Settings(BaseSettings):
+class Settings(BaseConfig):
     APP_NAME: str = "DocuSpace"
     APP_ENV: str = "production"
     APP_URL: str = "http://localhost"

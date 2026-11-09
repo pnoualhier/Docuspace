@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from uuid import UUID
 from datetime import datetime
 from pydantic import BaseModel, Field
@@ -28,6 +28,19 @@ class FolderRead(BaseModel):
     class Config:
         from_attributes = True
 
+class FolderTreeItem(BaseModel):
+    id: UUID
+    tenant_id: UUID
+    parent_id: Optional[UUID]
+    name: str
+    color: str
+    is_favorite: bool
+    document_count: int = 0
+    subfolders: List['FolderTreeItem'] = []
+
+    class Config:
+        from_attributes = True
+
 class DocumentRead(BaseModel):
     id: UUID
     tenant_id: UUID
@@ -46,6 +59,32 @@ class DocumentRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+class DocumentUpdate(BaseModel):
+    original_name: Optional[str] = Field(None, min_length=1, max_length=255)
+    folder_id: Optional[UUID] = None
+    is_favorite: Optional[bool] = None
+
+class DocumentCopyRequest(BaseModel):
+    target_folder_id: Optional[UUID] = None
+    new_name: Optional[str] = None
+
+class FolderCopyRequest(BaseModel):
+    target_parent_id: Optional[UUID] = None
+    new_name: Optional[str] = None
+
+class BulkDocumentMoveRequest(BaseModel):
+    document_ids: List[UUID]
+    target_folder_id: Optional[UUID] = None
+
+class BulkDocumentActionRequest(BaseModel):
+    document_ids: List[UUID]
+
+class BulkOperationResult(BaseModel):
+    success_count: int
+    failed_count: int
+    message: str
+    affected_ids: List[UUID]
 
 class DocumentVersionRead(BaseModel):
     id: UUID

@@ -31,6 +31,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { AuthModal } from './components/AuthModal';
 import { SecuritySimulatorModal } from './components/SecuritySimulatorModal';
 import { TenantMembersModal } from './components/TenantMembersModal';
+import { MoveModal } from './components/MoveModal';
 import { 
   FileText, 
   Folder as FolderIcon, 
@@ -75,6 +76,10 @@ export default function App() {
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [isSecuritySimulatorOpen, setIsSecuritySimulatorOpen] = useState(false);
   const [isMembersOpen, setIsMembersOpen] = useState(false);
+  const [moveModal, setMoveModal] = useState<{
+    isOpen: boolean;
+    itemToMove: { type: 'document' | 'folder' | 'bulk'; item: DocumentItem | Folder | null; bulkIds?: string[] };
+  }>({ isOpen: false, itemToMove: { type: 'document', item: null } });
 
   // Resolved active tenant & plan
   const currentTenant = useMemo(() => {
@@ -324,6 +329,155 @@ export default function App() {
     }));
   };
 
+  // --- Folder & Document Advanced Operations (Phase 3) ---
+  const handleMoveDocument = (doc: DocumentItem) => {
+    setMoveModal({
+      isOpen: true,
+      itemToMove: { type: 'document', item: doc }
+    });
+  };
+
+  const handleCopyDocument = (doc: DocumentItem) => {
+    const copyId = `doc-${crypto.randomUUID()}`;
+    const copyName = `${doc.originalName.replace(/\.[^/.]+$/, '')} - Copie.${doc.extension}`;
+    const newDoc: DocumentItem = {
+      ...doc,
+      id: copyId,
+      originalName: copyName,
+      storageKey: `tenants/${doc.tenantId}/${copyId}.${doc.extension}`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      versions: [
+        {
+          id: `ver-${crypto.randomUUID()}`,
+          documentId: copyId,
+          versionNumber: 1,
+          sizeBytes: doc.sizeBytes,
+          sha256Hash: doc.sha256Hash,
+          storageKey: `tenants/${doc.tenantId}/${copyId}.${doc.extension}`,
+          mimeType: doc.mimeType,
+          changeSummary: 'Duplication initiale',
+          createdAt: new Date().toISOString()
+        }
+      ]
+    };
+
+    setDocuments(prev => [newDoc, ...prev]);
+
+    // Update tenant storage quota
+    setTenants(prev => prev.map(t => {
+      if (t.id === doc.tenantId) {
+        return {
+          ...t,
+          usedBytes: (t.usedBytes || 0) + doc.sizeBytes,
+          documentCount: (t.documentCount || 0) + 1
+        };
+      }
+      return t;
+    }));
+
+    logAction('DOC_COPY', 'DOCUMENT', copyName, `Duplication du document (${formatBytes(doc.sizeBytes)})`);
+  };
+
+  const handleMoveFolder = (folder: Folder) => {
+    setMoveModal({
+      isOpen: true,
+      itemToMove: { type: 'folder', item: folder }
+    });
+  };
+
+  const handleCopyFolder = (folder: Folder) => {
+    const copyId = `fld-${crypto.randomUUID()}`;
+    const copyName = `${folder.name} - Copie`;
+    const newFolder: Folder = {
+      ...folder,
+      id: copyId,
+      name: copyName,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    setFolders(prev => [...prev, newFolder]);
+    logAction('FOLDER_COPY', 'FOLDER', copyName, `Duplication du dossier "${folder.name}"`);
+  };
+
+  const handleBulkMove = (docIds: string[]) => {
+    setMoveModal({
+      isOpen: true,
+      itemToMove: { type: 'bulk', item: null, bulkIds: docIds }
+    });
+  };
+
+  const handleConfirmMove = (targetFolderId: string | null) => {
+    const { type, item, bulkIds } = moveModal.itemToMove;
+
+    if (type === 'document' && item) {
+      setDocuments(prev => prev.map(d => {
+        if (d.id === (item as DocumentItem).id) {
+          return { ...d, folderId: targetFolderId, updatedAt: new Date().toISOString() };
+        }
+        return d;
+      }));
+      logAction('DOC_MOVE', 'DOCUMENT', (item as DocumentItem).originalName, `Déplacement vers dossier ${targetFolderId || 'Racine'}`);
+    } else if (type === 'folder' && item) {
+      setFolders(prev => prev.map(f => {
+        if (f.id === (item as Folder).id) {
+          return { ...f, parentId: targetFolderId, updatedAt: new Date().toISOString() };
+        }
+        return f;
+      }));
+      logAction('FOLDER_MOVE', 'FOLDER', (item as Folder).name, `Déplacement vers parent ${targetFolderId || 'Racine'}`);
+    } else if (type === 'bulk' && bulkIds && bulkIds.length > 0) {
+      setDocuments(prev => prev.map(d => {
+        if (bulkIds.includes(d.id)) {
+          return { ...d, folderId: targetFolderId, updatedAt: new Date().toISOString() };
+        }
+        return d;
+      }));
+      logAction('BULK_DOC_MOVE', 'DOCUMENT', `${bulkIds.length} fichiers`, `Déplacement groupé vers dossier ${targetFolderId || 'Racine'}`);
+    }
+  };
+
+  const handleBulkTrash = (docIds: string[]) => {
+    setDocuments(prev => prev.map(d => {
+      if (docIds.includes(d.id)) {
+        return { ...d, isTrashed: true, trashedAt: new Date().toISOString() };
+      }
+      return d;
+    }));
+    logAction('BULK_DOC_TRASH', 'DOCUMENT', `${docIds.length} fichiers`, 'Mise en corbeille groupée');
+  };
+
+  const handleBulkRestore = (docIds: string[]) => {
+    setDocuments(prev => prev.map(d => {
+      if (docIds.includes(d.id)) {
+        return { ...d, isTrashed: false, trashedAt: undefined };
+      }
+      return d;
+    }));
+    logAction('BULK_DOC_RESTORE', 'DOCUMENT', `${docIds.length} fichiers`, 'Restauration groupée depuis la corbeille');
+  };
+
+  const handleBulkPurge = (docIds: string[]) => {
+    const docsToPurge = documents.filter(d => docIds.includes(d.id));
+    const totalBytesFreed = docsToPurge.reduce((acc, curr) => acc + curr.sizeBytes, 0);
+
+    setDocuments(prev => prev.filter(d => !docIds.includes(d.id)));
+
+    // Reclaim storage
+    setTenants(prev => prev.map(t => {
+      if (t.id === currentTenant.id) {
+        return {
+          ...t,
+          usedBytes: Math.max(0, (t.usedBytes || 0) - totalBytesFreed),
+          documentCount: Math.max(0, (t.documentCount || 0) - docsToPurge.length)
+        };
+      }
+      return t;
+    }));
+
+    logAction('BULK_DOC_PURGE', 'DOCUMENT', `${docIds.length} fichiers`, `Purge définitive (${formatBytes(totalBytesFreed)} libérés)`);
+  };
+
   const handleRestoreVersion = (doc: DocumentItem, version: DocumentVersion) => {
     setDocuments(prev => prev.map(d => {
       if (d.id === doc.id) {
@@ -544,6 +698,7 @@ export default function App() {
               breadcrumbs={breadcrumbs}
               folders={displayedItems.flds}
               documents={displayedItems.docs}
+              allFolders={tenantFolders}
               viewMode={viewMode}
               onToggleViewMode={() => setViewMode(prev => prev === 'grid' ? 'list' : 'grid')}
               onNavigateFolder={(fId) => setCurrentFolderId(fId)}
@@ -555,6 +710,8 @@ export default function App() {
               onRestoreDoc={handleRestoreDoc}
               onPurgeDoc={handlePurgeDoc}
               onRenameDoc={handleRenameDoc}
+              onMoveDocument={handleMoveDocument}
+              onCopyDocument={handleCopyDocument}
               onOpenUpload={() => {
                 if (currentTenant.role === 'VIEWER' || currentTenant.role === 'GUEST') {
                   alert("Action refusée : votre rôle est LECTEUR seul dans cet espace documentaire (politique RBAC appliquée).");
@@ -570,7 +727,13 @@ export default function App() {
                 setFolderModal({ isOpen: true, folderToEdit: null, parentFolder: currentFolder });
               }}
               onRenameFolder={(f) => setFolderModal({ isOpen: true, folderToEdit: f, parentFolder: currentFolder })}
+              onMoveFolder={handleMoveFolder}
+              onCopyFolder={handleCopyFolder}
               onTrashFolder={handleTrashFolder}
+              onBulkMove={handleBulkMove}
+              onBulkTrash={handleBulkTrash}
+              onBulkRestore={handleBulkRestore}
+              onBulkPurge={handleBulkPurge}
               isTrashView={currentTab === 'trash'}
               userRole={currentTenant.role}
             />
@@ -655,6 +818,14 @@ export default function App() {
         onClose={() => setIsMembersOpen(false)}
         currentTenant={currentTenant}
         currentUser={currentUser}
+      />
+
+      <MoveModal
+        isOpen={moveModal.isOpen}
+        onClose={() => setMoveModal({ isOpen: false, itemToMove: { type: 'document', item: null } })}
+        itemToMove={moveModal.itemToMove}
+        folders={tenantFolders}
+        onConfirmMove={handleConfirmMove}
       />
     </div>
   );

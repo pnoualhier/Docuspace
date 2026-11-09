@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   Folder as FolderIcon, 
   FileText, 
@@ -25,17 +25,22 @@ import {
   ExternalLink,
   Edit2,
   MoveRight,
+  Copy,
   CheckSquare,
-  Square
+  Square,
+  Filter,
+  RotateCcw
 } from 'lucide-react';
 import { DocumentItem, Folder } from '../types';
 import { formatBytes, getFileCategory } from '../services/crypto';
+import { AdvancedSearchPanel, SearchFilters } from './AdvancedSearchPanel';
 
 interface FileExplorerProps {
   currentFolder: Folder | null;
   breadcrumbs: Folder[];
   folders: Folder[];
   documents: DocumentItem[];
+  allFolders?: Folder[];
   viewMode: 'grid' | 'list';
   onToggleViewMode: () => void;
   onNavigateFolder: (folderId: string | null) => void;
@@ -47,10 +52,18 @@ interface FileExplorerProps {
   onRestoreDoc: (docId: string) => void;
   onPurgeDoc: (docId: string) => void;
   onRenameDoc: (doc: DocumentItem) => void;
+  onMoveDocument: (doc: DocumentItem) => void;
+  onCopyDocument: (doc: DocumentItem) => void;
   onOpenUpload: () => void;
   onOpenNewFolder: () => void;
   onRenameFolder: (folder: Folder) => void;
+  onMoveFolder: (folder: Folder) => void;
+  onCopyFolder: (folder: Folder) => void;
   onTrashFolder: (folderId: string) => void;
+  onBulkMove: (docIds: string[]) => void;
+  onBulkTrash: (docIds: string[]) => void;
+  onBulkRestore?: (docIds: string[]) => void;
+  onBulkPurge?: (docIds: string[]) => void;
   isTrashView?: boolean;
   userRole?: 'OWNER' | 'EDITOR' | 'VIEWER' | 'GUEST';
 }
@@ -60,6 +73,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
   breadcrumbs,
   folders,
   documents,
+  allFolders = [],
   viewMode,
   onToggleViewMode,
   onNavigateFolder,
@@ -71,42 +85,112 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
   onRestoreDoc,
   onPurgeDoc,
   onRenameDoc,
+  onMoveDocument,
+  onCopyDocument,
   onOpenUpload,
   onOpenNewFolder,
   onRenameFolder,
+  onMoveFolder,
+  onCopyFolder,
   onTrashFolder,
+  onBulkMove,
+  onBulkTrash,
+  onBulkRestore,
+  onBulkPurge,
   isTrashView = false,
   userRole = 'OWNER',
 }) => {
   const isReadOnly = userRole === 'VIEWER' || userRole === 'GUEST';
-  const [filterCategory, setFilterCategory] = useState<string>('all');
+  const [showAdvancedSearch, setShowAdvancedSearch] = useState(false);
   const [sortBy, setSortBy] = useState<'name' | 'date' | 'size'>('date');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
   const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
-  const [activeMenuDocId, setActiveMenuDocId] = useState<string | null>(null);
 
-  // Filter documents
-  const filteredDocs = documents.filter((doc) => {
-    if (filterCategory === 'all') return true;
-    const cat = getFileCategory(doc.mimeType, doc.extension);
-    return cat === filterCategory;
+  // Advanced search filters state
+  const [searchFilters, setSearchFilters] = useState<SearchFilters>({
+    query: '',
+    category: 'all',
+    sizeRange: 'all',
+    dateRange: 'all',
+    folderId: 'all',
+    favoritesOnly: false,
   });
+
+  const handleResetFilters = () => {
+    setSearchFilters({
+      query: '',
+      category: 'all',
+      sizeRange: 'all',
+      dateRange: 'all',
+      folderId: 'all',
+      favoritesOnly: false,
+    });
+  };
+
+  // Filter documents using multi-criteria search
+  const filteredDocs = useMemo(() => {
+    const now = new Date().getTime();
+
+    return documents.filter((doc) => {
+      // Category filter
+      if (searchFilters.category !== 'all') {
+        const cat = getFileCategory(doc.mimeType, doc.extension);
+        if (cat !== searchFilters.category) return false;
+      }
+
+      // Keyword query
+      if (searchFilters.query.trim()) {
+        const q = searchFilters.query.toLowerCase();
+        const matches = 
+          doc.originalName.toLowerCase().includes(q) ||
+          doc.extension.toLowerCase().includes(q) ||
+          doc.sha256Hash.toLowerCase().includes(q);
+        if (!matches) return false;
+      }
+
+      // Size Range
+      if (searchFilters.sizeRange === 'small' && doc.sizeBytes >= 1048576) return false; // >= 1 Mo
+      if (searchFilters.sizeRange === 'medium' && (doc.sizeBytes < 1048576 || doc.sizeBytes > 10485760)) return false; // 1-10 Mo
+      if (searchFilters.sizeRange === 'large' && doc.sizeBytes <= 10485760) return false; // <= 10 Mo
+
+      // Date Range
+      if (searchFilters.dateRange !== 'all') {
+        const docTime = new Date(doc.updatedAt).getTime();
+        const diffDays = (now - docTime) / (1000 * 3600 * 24);
+        if (searchFilters.dateRange === '7d' && diffDays > 7) return false;
+        if (searchFilters.dateRange === '30d' && diffDays > 30) return false;
+        if (searchFilters.dateRange === '1y' && diffDays > 365) return false;
+      }
+
+      // Folder Scope
+      if (searchFilters.folderId !== 'all') {
+        if (doc.folderId !== searchFilters.folderId) return false;
+      }
+
+      // Favorites
+      if (searchFilters.favoritesOnly && !doc.isFavorite) return false;
+
+      return true;
+    });
+  }, [documents, searchFilters]);
 
   // Sort documents
-  const sortedDocs = [...filteredDocs].sort((a, b) => {
-    if (sortBy === 'name') {
-      return sortOrder === 'asc' 
-        ? a.originalName.localeCompare(b.originalName) 
-        : b.originalName.localeCompare(a.originalName);
-    }
-    if (sortBy === 'size') {
-      return sortOrder === 'asc' ? a.sizeBytes - b.sizeBytes : b.sizeBytes - a.sizeBytes;
-    }
-    // Default: date
-    const dateA = new Date(a.updatedAt).getTime();
-    const dateB = new Date(b.updatedAt).getTime();
-    return sortOrder === 'asc' ? dateA - dateB : dateB - dateA;
-  });
+  const sortedDocs = useMemo(() => {
+    return [...filteredDocs].sort((a, b) => {
+      if (sortBy === 'name') {
+        return sortOrder === 'asc' 
+          ? a.originalName.localeCompare(b.originalName) 
+          : b.originalName.localeCompare(a.originalName);
+      }
+      if (sortBy === 'size') {
+        return sortOrder === 'asc' ? a.sizeBytes - b.sizeBytes : b.sizeBytes - a.sizeBytes;
+      }
+      // Default: date
+      const dateA = new Date(a.updatedAt).getTime();
+      const dateB = new Date(b.updatedAt).getTime();
+      return sortOrder === 'asc' ? dateA - dateB : dateB - dateA;
+    });
+  }, [filteredDocs, sortBy, sortOrder]);
 
   const toggleSelectDoc = (id: string) => {
     setSelectedDocIds(prev => 
@@ -150,11 +234,11 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
         <div className="flex items-center space-x-2 text-xs overflow-x-auto py-1">
           <button
             onClick={() => onNavigateFolder(null)}
-            className={`font-medium hover:text-white transition-colors ${
+            className={`font-medium hover:text-white transition-colors flex items-center space-x-1 ${
               currentFolder === null ? 'text-white font-semibold' : 'text-slate-400'
             }`}
           >
-            {isTrashView ? 'Corbeille (Purgée à 30j)' : 'Espace racine'}
+            <span>{isTrashView ? 'Corbeille (Purgée à 30j)' : 'Espace racine'}</span>
           </button>
 
           {breadcrumbs.map((crumb, idx) => (
@@ -174,22 +258,18 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
 
         {/* Action Controls & Filters */}
         <div className="flex items-center space-x-3 shrink-0">
-          {/* Category filter pills */}
-          <div className="hidden lg:flex items-center space-x-1 p-1 bg-slate-900 border border-slate-800 rounded-lg text-[11px]">
-            {['all', 'pdf', 'image', 'word', 'excel', 'archive'].map((cat) => (
-              <button
-                key={cat}
-                onClick={() => setFilterCategory(cat)}
-                className={`px-2.5 py-1 rounded capitalize transition-colors ${
-                  filterCategory === cat
-                    ? 'bg-blue-600 text-white font-semibold'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                {cat === 'all' ? 'Tous' : cat}
-              </button>
-            ))}
-          </div>
+          {/* Advanced Search Toggle */}
+          <button
+            onClick={() => setShowAdvancedSearch(!showAdvancedSearch)}
+            className={`px-3 py-1.5 rounded-lg border text-xs font-medium flex items-center space-x-1.5 transition-colors ${
+              showAdvancedSearch
+                ? 'bg-blue-600/20 text-blue-300 border-blue-500/40'
+                : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Filter className="w-3.5 h-3.5 text-blue-400" />
+            <span>Filtres avancés</span>
+          </button>
 
           {/* Sort Menu */}
           <div className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-300">
@@ -233,35 +313,78 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
         </div>
       )}
 
-      {/* Multi-selection banner */}
+      {/* Multi-selection banner with bulk operations */}
       {selectedDocIds.length > 0 && (
-        <div className="mx-6 mt-4 p-3 rounded-xl bg-blue-950/40 border border-blue-500/30 flex items-center justify-between text-xs text-blue-200 animate-in fade-in">
+        <div className="mx-6 mt-4 p-3 rounded-xl bg-blue-950/40 border border-blue-500/30 flex flex-wrap items-center justify-between gap-3 text-xs text-blue-200 animate-in fade-in">
           <div className="flex items-center space-x-2">
+            <CheckSquare className="w-4 h-4 text-blue-400" />
             <span className="font-semibold">{selectedDocIds.length} fichier(s) sélectionné(s)</span>
           </div>
           <div className="flex items-center space-x-2">
-            <button
-              onClick={() => alert(`Téléchargement groupé de ${selectedDocIds.length} fichiers sous archive ZIP sécurisée.`)}
-              className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium flex items-center space-x-1.5 transition-colors"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Télécharger (.ZIP)</span>
-            </button>
-            <button
-              onClick={() => {
-                selectedDocIds.forEach(id => onTrashDoc(id));
-                setSelectedDocIds([]);
-              }}
-              className="px-3 py-1.5 rounded-lg bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 font-medium flex items-center space-x-1.5 transition-colors"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              <span>Placer à la corbeille</span>
-            </button>
+            {!isTrashView ? (
+              <>
+                <button
+                  onClick={() => alert(`Téléchargement groupé de ${selectedDocIds.length} fichiers sous archive ZIP sécurisée.`)}
+                  className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium flex items-center space-x-1.5 transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Télécharger (.ZIP)</span>
+                </button>
+                {!isReadOnly && (
+                  <button
+                    onClick={() => onBulkMove(selectedDocIds)}
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium flex items-center space-x-1.5 transition-colors border border-slate-700"
+                  >
+                    <MoveRight className="w-3.5 h-3.5" />
+                    <span>Déplacer groupé</span>
+                  </button>
+                )}
+                {!isReadOnly && (
+                  <button
+                    onClick={() => {
+                      onBulkTrash(selectedDocIds);
+                      setSelectedDocIds([]);
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 font-medium flex items-center space-x-1.5 transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Placer en corbeille</span>
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
+                {onBulkRestore && (
+                  <button
+                    onClick={() => {
+                      onBulkRestore(selectedDocIds);
+                      setSelectedDocIds([]);
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 font-medium flex items-center space-x-1.5 transition-colors"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Restaurer la sélection</span>
+                  </button>
+                )}
+                {onBulkPurge && (
+                  <button
+                    onClick={() => {
+                      onBulkPurge(selectedDocIds);
+                      setSelectedDocIds([]);
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-medium flex items-center space-x-1.5 transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Détruire définitivement</span>
+                  </button>
+                )}
+              </>
+            )}
             <button
               onClick={() => setSelectedDocIds([])}
               className="text-slate-400 hover:text-white text-xs px-2"
             >
-              Désélectionner
+              Annuler
             </button>
           </div>
         </div>
@@ -269,6 +392,16 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
 
       {/* Main Content Area */}
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        {/* Collapsible Advanced Search Panel */}
+        {showAdvancedSearch && (
+          <AdvancedSearchPanel
+            filters={searchFilters}
+            onFilterChange={setSearchFilters}
+            onReset={handleResetFilters}
+            folders={allFolders.length > 0 ? allFolders : folders}
+          />
+        )}
+
         {/* Folders Section (if not in trash) */}
         {!isTrashView && folders.length > 0 && (
           <div className="space-y-3">
@@ -306,20 +439,38 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
                     onClick={(e) => e.stopPropagation()} 
                     className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center space-x-1"
                   >
-                    <button
-                      onClick={() => onRenameFolder(folder)}
-                      className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-700"
-                      title="Renommer le dossier"
-                    >
-                      <Edit2 className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      onClick={() => onTrashFolder(folder.id)}
-                      className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-slate-700"
-                      title="Supprimer le dossier"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    {!isReadOnly && (
+                      <>
+                        <button
+                          onClick={() => onMoveFolder(folder)}
+                          className="p-1 rounded text-slate-400 hover:text-sky-400 hover:bg-slate-700"
+                          title="Déplacer le dossier"
+                        >
+                          <MoveRight className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => onCopyFolder(folder)}
+                          className="p-1 rounded text-slate-400 hover:text-indigo-400 hover:bg-slate-700"
+                          title="Dupliquer le dossier"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => onRenameFolder(folder)}
+                          className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-700"
+                          title="Renommer le dossier"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => onTrashFolder(folder.id)}
+                          className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-slate-700"
+                          title="Supprimer le dossier"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               ))}
@@ -365,7 +516,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
                     : 'Glissez-déposez vos fichiers pour les chiffrer, les analyser avec ClamAV et les classer.'}
                 </p>
               </div>
-              {!isTrashView && (
+              {!isTrashView && !isReadOnly && (
                 <div className="flex items-center justify-center space-x-3 pt-2">
                   <button
                     onClick={onOpenUpload}
@@ -406,7 +557,6 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
                         <div className="p-2 rounded-xl bg-slate-800/80">
                           {getDocIcon(doc.mimeType, doc.extension)}
                         </div>
-                        {/* Antivirus ClamAV badge */}
                         <div
                           className={`flex items-center space-x-1 px-1.5 py-0.5 rounded text-[10px] font-medium border ${
                             doc.antivirusStatus === 'CLEAN'
@@ -476,7 +626,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
                             <button
                               onClick={() => onShareDocument(doc)}
                               className="p-1 rounded text-slate-400 hover:text-blue-400 hover:bg-slate-800 transition-colors"
-                              title="Partager en toute sécurité"
+                              title="Partager"
                             >
                               <Share2 className="w-3.5 h-3.5" />
                             </button>
@@ -487,13 +637,31 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
                             >
                               <History className="w-3.5 h-3.5" />
                             </button>
-                            <button
-                              onClick={() => onTrashDoc(doc.id)}
-                              className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition-colors"
-                              title="Déplacer vers la corbeille"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                            {!isReadOnly && (
+                              <>
+                                <button
+                                  onClick={() => onMoveDocument(doc)}
+                                  className="p-1 rounded text-slate-400 hover:text-sky-400 hover:bg-slate-800 transition-colors"
+                                  title="Déplacer"
+                                >
+                                  <MoveRight className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => onCopyDocument(doc)}
+                                  className="p-1 rounded text-slate-400 hover:text-indigo-400 hover:bg-slate-800 transition-colors"
+                                  title="Dupliquer"
+                                >
+                                  <Copy className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => onTrashDoc(doc.id)}
+                                  className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition-colors"
+                                  title="Déplacer vers la corbeille"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </>
+                            )}
                           </>
                         ) : (
                           <>
@@ -618,20 +786,38 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
                                 >
                                   <History className="w-3.5 h-3.5" />
                                 </button>
-                                <button
-                                  onClick={() => onRenameDoc(doc)}
-                                  className="p-1.5 rounded text-slate-400 hover:text-white hover:bg-slate-800"
-                                  title="Renommer"
-                                >
-                                  <Edit2 className="w-3.5 h-3.5" />
-                                </button>
-                                <button
-                                  onClick={() => onTrashDoc(doc.id)}
-                                  className="p-1.5 rounded text-slate-400 hover:text-rose-400 hover:bg-slate-800"
-                                  title="Corbeille"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
+                                {!isReadOnly && (
+                                  <>
+                                    <button
+                                      onClick={() => onMoveDocument(doc)}
+                                      className="p-1.5 rounded text-slate-400 hover:text-sky-400 hover:bg-slate-800"
+                                      title="Déplacer"
+                                    >
+                                      <MoveRight className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      onClick={() => onCopyDocument(doc)}
+                                      className="p-1.5 rounded text-slate-400 hover:text-indigo-400 hover:bg-slate-800"
+                                      title="Dupliquer"
+                                    >
+                                      <Copy className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      onClick={() => onRenameDoc(doc)}
+                                      className="p-1.5 rounded text-slate-400 hover:text-white hover:bg-slate-800"
+                                      title="Renommer"
+                                    >
+                                      <Edit2 className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      onClick={() => onTrashDoc(doc.id)}
+                                      className="p-1.5 rounded text-slate-400 hover:text-rose-400 hover:bg-slate-800"
+                                      title="Corbeille"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </>
+                                )}
                               </>
                             ) : (
                               <>

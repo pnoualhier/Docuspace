@@ -75,3 +75,31 @@ class DocumentVersion(Base):
     )
 
     document = relationship("Document", back_populates="versions")
+
+class UploadSession(Base):
+    __tablename__ = "upload_sessions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    folder_id = Column(UUID(as_uuid=True), ForeignKey("folders.id", ondelete="SET NULL"), nullable=True)
+    original_name = Column(String(255), nullable=False)
+    extension = Column(String(32), nullable=False)
+    mime_type = Column(String(128), nullable=False)
+    size_bytes = Column(BigInteger, nullable=False)
+    storage_key = Column(String(512), unique=True, nullable=False)
+    upload_token = Column(String(128), unique=True, nullable=False)
+    
+    # Status: INITIATED, UPLOADING, UPLOADED, SCANNING, COMPLETED, REJECTED_QUOTA, INFECTED, EXPIRED, FAILED
+    status = Column(String(32), default="INITIATED", nullable=False)
+    antivirus_status = Column(String(32), default="PENDING", nullable=False)
+    antivirus_details = Column(Text, nullable=True)
+    sha256_hash = Column(String(64), nullable=True)
+    
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    tenant = relationship("Tenant")
+    user = relationship("User")
+    folder = relationship("Folder")

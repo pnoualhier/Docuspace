@@ -8,7 +8,8 @@ import {
   Loader2, 
   CheckCircle2, 
   Lock,
-  HardDrive
+  HardDrive,
+  ShieldAlert
 } from 'lucide-react';
 import { Plan, Tenant, DocumentItem, Folder } from '../types';
 import { calculateSHA256, formatBytes, generateStorageKey } from '../services/crypto';
@@ -64,8 +65,21 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
     }
   };
 
+  const PROHIBITED_EXTS = ['.exe', '.bat', '.cmd', '.sh', '.bash', '.ps1', '.vbs', '.msi', '.dll', '.com', '.scr', '.sys', '.bin', '.elf'];
+
   const handleFileSelected = (file: File) => {
     setErrorMsg(null);
+
+    // 0. Check prohibited executable extensions (Zero-Execution policy)
+    const nameLower = file.name.toLowerCase();
+    const isProhibited = PROHIBITED_EXTS.some(ext => nameLower.endsWith(ext));
+    if (isProhibited) {
+      setErrorMsg(
+        `Fichier rejeté : les extensions exécutables ou scripts (.exe, .sh, .bat, .dll, etc.) sont strictement interdites pour garantir la sécurité de la plateforme.`
+      );
+      setSelectedFile(null);
+      return;
+    }
 
     // 1. Check max single file size allowed by Plan
     if (file.size > currentPlan.maxFileSizeBytes) {
@@ -89,6 +103,17 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
     setSelectedFile(file);
   };
 
+  const handleInjectEicarTest = () => {
+    // Standard safe EICAR test file to simulate Antivirus quarantine live
+    const eicarBlob = new Blob(
+      ["X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"],
+      { type: "text/plain" }
+    );
+    const testFile = new File([eicarBlob], "eicar_virus_test.txt", { type: "text/plain" });
+    setSelectedFile(testFile);
+    setErrorMsg(null);
+  };
+
   const processUpload = async () => {
     if (!selectedFile) return;
 
@@ -97,16 +122,26 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
 
     try {
       // Step 1: Quota reservation & local SHA-256 calculation
-      setUploadStep('Calcul cryptographique de l’empreinte SHA-256...');
+      setUploadStep('Étape 1/3 : Calcul de l’empreinte cryptographique SHA-256 (Web Crypto API)...');
       const sha256 = await calculateSHA256(selectedFile);
 
+      // Check for EICAR test signature simulation in content
+      const fileText = await selectedFile.text().catch(() => '');
+      const isEicarInfected = fileText.includes("EICAR-STANDARD-ANTIVIRUS-TEST-FILE");
+
       // Step 2: Streaming to S3 MinIO emulation
-      setUploadStep('Chiffrement & streaming vers MinIO S3...');
+      setUploadStep('Étape 2/3 : Chiffrement & transfert streaming vers bucket MinIO S3...');
       await new Promise(r => setTimeout(r, 600));
 
       // Step 3: Antivirus ClamAV scan (fail-closed policy)
-      setUploadStep('Analyse antivirus ClamAV en flux (fail-closed)...');
-      await new Promise(r => setTimeout(r, 600));
+      setUploadStep('Étape 3/3 : Analyse antivirus ClamAV en flux (Politique Fail-Closed)...');
+      await new Promise(r => setTimeout(r, 700));
+
+      if (isEicarInfected) {
+        throw new Error(
+          "Alerte de sécurité ClamAV : Signature 'EICAR.Test.File-FOUND' détectée ! Le fichier a été immédiatement rejeté, supprimé du stockage et placé en quarantaine."
+        );
+      }
 
       // Step 4: Finalize metadata
       const ext = selectedFile.name.split('.').pop() || 'bin';
@@ -115,7 +150,7 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
       // Read textual preview if text-based or small image
       let previewText: string | undefined = undefined;
       if (selectedFile.type.startsWith('text/') || ['csv', 'md', 'json', 'xml'].includes(ext)) {
-        previewText = await selectedFile.text();
+        previewText = fileText;
       }
 
       const newDoc: DocumentItem = {
@@ -144,7 +179,7 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
             sizeBytes: selectedFile.size,
             mimeType: selectedFile.type || 'application/octet-stream',
             sha256Hash: sha256,
-            changeSummary: 'Version initiale importée',
+            changeSummary: 'Version initiale importée (MinIO S3 + ClamAV Sain)',
             createdAt: new Date().toISOString(),
           }
         ],
@@ -247,6 +282,22 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
             <Lock className="w-3.5 h-3.5 text-sky-400 shrink-0" />
             <span>Clé MinIO opaque S3</span>
           </div>
+        </div>
+
+        {/* Antivirus Live Test Simulation */}
+        <div className="flex items-center justify-between p-2.5 rounded-xl bg-slate-950/80 border border-slate-800 text-xs">
+          <div className="flex items-center space-x-2 text-slate-400 text-[11px]">
+            <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+            <span>Tester la détection ClamAV :</span>
+          </div>
+          <button
+            type="button"
+            onClick={handleInjectEicarTest}
+            disabled={isProcessing}
+            className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/20 text-[10px] font-medium transition-colors"
+          >
+            Injecter fichier test EICAR
+          </button>
         </div>
 
         {/* Processing step */}

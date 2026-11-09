@@ -1,7 +1,7 @@
 from backend.app.models.plan import Plan
 from backend.app.models.user import User, Session
 from backend.app.models.tenant import Tenant, Role, TenantMember, StorageUsage, PermissionModel, RolePermission
-from backend.app.models.document import Folder, Document, DocumentVersion
+from backend.app.models.document import Folder, Document, DocumentVersion, UploadSession
 from backend.app.models.share import Share, ShareRecipient
 from backend.app.models.audit import AuditLog, Notification
 
@@ -18,6 +18,7 @@ __all__ = [
     "Folder",
     "Document",
     "DocumentVersion",
+    "UploadSession",
     "Share",
     "ShareRecipient",
     "AuditLog",
