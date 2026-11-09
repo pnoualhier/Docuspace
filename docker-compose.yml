@@ -106,16 +106,16 @@ services:
       redis:
         condition: service_healthy
     env_file:
-      - .env
+      - docker.env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-docuspace_user}:${POSTGRES_PASSWORD:-docuspace_secure_password_change_me}@postgres:5432/${POSTGRES_DB:-docuspace}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-docuspace_user}:${POSTGRES_PASSWORD:-1931f981e26267c862f352c516b5f2bb}@postgres:5432/${POSTGRES_DB:-docuspace}
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-docuspace_minio_admin}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-docuspace_minio_secret_key_change_me}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-ab156e9361da7f2d77efb077221f5285}
       MINIO_SECURE: "false"
       CLAMAV_HOST: clamav
       CLAMAV_PORT: "3310"
-      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secure_pass_change_me}@redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-323da47d5b7bcb3aa99b4322f3260ce7}@redis:6379/0
     volumes:
       - ./backend:/app/backend
     ports:

@@ -47,14 +47,9 @@ sudo systemctl enable --now docker
 sudo mkdir -p /opt/docuspace
 cd /opt/docuspace
 
-# 2. Préparer les variables d'environnement
-cp .env.example .env
-
-# Générer des secrets forts :
-sed -i "s/replace_with_strong_random_db_password/$(openssl rand -hex 24)/g" .env
-sed -i "s/replace_with_strong_minio_secret_key/$(openssl rand -hex 24)/g" .env
-sed -i "s/replace_with_strong_redis_password/$(openssl rand -hex 24)/g" .env
-sed -i "s/generate_with_openssl_rand_hex_32_change_me/$(openssl rand -hex 32)/g" .env
+# 2. Préparer automatiquement les variables d'environnement
+# Un script autonome génère toutes les clés cryptographiques et les configure :
+./scripts/init/generate_env.sh docker.env
 
 # 3. Lancer les conteneurs avec Docker Compose
 docker compose up -d --build

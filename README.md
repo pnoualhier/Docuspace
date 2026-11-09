@@ -31,8 +31,8 @@ Conçue comme un **monolithe modulaire multi-tenant**, DocuSpace garantit une so
 ## ⚡ Démarrage Rapide (Docker Compose sur Debian)
 
 ```bash
-# 1. Cloner et configurer l'environnement
-cp .env.example .env
+# 1. Générer automatiquement les variables d'environnement chiffrées
+./scripts/init/generate_env.sh docker.env
 
 # 2. Démarrer l'ensemble des services (Postgres, MinIO, ClamAV, Redis, Backend, Frontend, Nginx)
 docker compose up -d --build
