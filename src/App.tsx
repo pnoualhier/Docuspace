@@ -29,6 +29,8 @@ import { AdminConsole } from './components/AdminConsole';
 import { ArchitectureModal } from './components/ArchitectureModal';
 import { SettingsModal } from './components/SettingsModal';
 import { AuthModal } from './components/AuthModal';
+import { SecuritySimulatorModal } from './components/SecuritySimulatorModal';
+import { TenantMembersModal } from './components/TenantMembersModal';
 import { 
   FileText, 
   Folder as FolderIcon, 
@@ -71,6 +73,8 @@ export default function App() {
   const [isArchitectureOpen, setIsArchitectureOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [isSecuritySimulatorOpen, setIsSecuritySimulatorOpen] = useState(false);
+  const [isMembersOpen, setIsMembersOpen] = useState(false);
 
   // Resolved active tenant & plan
   const currentTenant = useMemo(() => {
@@ -424,7 +428,15 @@ export default function App() {
         onSelectTenant={handleSelectTenant}
         onSwitchUser={handleSwitchUser}
         onOpenArchitecture={() => setIsArchitectureOpen(true)}
-        onOpenUpload={() => setIsUploadOpen(true)}
+        onOpenUpload={() => {
+          if (currentTenant.role === 'VIEWER' || currentTenant.role === 'GUEST') {
+            alert("Action refusée : votre rôle est LECTEUR seul dans cet espace documentaire (politique RBAC appliquée).");
+            return;
+          }
+          setIsUploadOpen(true);
+        }}
+        onOpenSecuritySimulator={() => setIsSecuritySimulatorOpen(true)}
+        onOpenMembers={() => setIsMembersOpen(true)}
         onLogout={() => setIsAuthOpen(true)}
         allUsers={users}
       />
@@ -442,8 +454,20 @@ export default function App() {
           currentUser={currentUser}
           currentTenant={currentTenant}
           currentPlan={currentPlan}
-          onOpenUpload={() => setIsUploadOpen(true)}
-          onOpenNewFolder={() => setFolderModal({ isOpen: true, folderToEdit: null, parentFolder: currentFolder })}
+          onOpenUpload={() => {
+            if (currentTenant.role === 'VIEWER' || currentTenant.role === 'GUEST') {
+              alert("Action refusée : votre rôle est LECTEUR seul dans cet espace documentaire (politique RBAC appliquée).");
+              return;
+            }
+            setIsUploadOpen(true);
+          }}
+          onOpenNewFolder={() => {
+            if (currentTenant.role === 'VIEWER' || currentTenant.role === 'GUEST') {
+              alert("Action refusée : votre rôle est LECTEUR seul dans cet espace documentaire (politique RBAC appliquée).");
+              return;
+            }
+            setFolderModal({ isOpen: true, folderToEdit: null, parentFolder: currentFolder });
+          }}
           trashedCount={trashedCount}
         />
 
@@ -531,11 +555,24 @@ export default function App() {
               onRestoreDoc={handleRestoreDoc}
               onPurgeDoc={handlePurgeDoc}
               onRenameDoc={handleRenameDoc}
-              onOpenUpload={() => setIsUploadOpen(true)}
-              onOpenNewFolder={() => setFolderModal({ isOpen: true, folderToEdit: null, parentFolder: currentFolder })}
+              onOpenUpload={() => {
+                if (currentTenant.role === 'VIEWER' || currentTenant.role === 'GUEST') {
+                  alert("Action refusée : votre rôle est LECTEUR seul dans cet espace documentaire (politique RBAC appliquée).");
+                  return;
+                }
+                setIsUploadOpen(true);
+              }}
+              onOpenNewFolder={() => {
+                if (currentTenant.role === 'VIEWER' || currentTenant.role === 'GUEST') {
+                  alert("Action refusée : votre rôle est LECTEUR seul dans cet espace documentaire (politique RBAC appliquée).");
+                  return;
+                }
+                setFolderModal({ isOpen: true, folderToEdit: null, parentFolder: currentFolder });
+              }}
               onRenameFolder={(f) => setFolderModal({ isOpen: true, folderToEdit: f, parentFolder: currentFolder })}
               onTrashFolder={handleTrashFolder}
               isTrashView={currentTab === 'trash'}
+              userRole={currentTenant.role}
             />
           )}
         </main>
@@ -602,6 +639,22 @@ export default function App() {
         onLogin={handleLogin}
         onRegister={handleRegister}
         availableUsers={users}
+      />
+
+      <SecuritySimulatorModal
+        isOpen={isSecuritySimulatorOpen}
+        onClose={() => setIsSecuritySimulatorOpen(false)}
+        currentUser={currentUser}
+        currentTenant={currentTenant}
+        allTenants={tenants}
+        allDocs={documents}
+      />
+
+      <TenantMembersModal
+        isOpen={isMembersOpen}
+        onClose={() => setIsMembersOpen(false)}
+        currentTenant={currentTenant}
+        currentUser={currentUser}
       />
     </div>
   );

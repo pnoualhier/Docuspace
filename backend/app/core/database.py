@@ -44,3 +44,15 @@ async def set_tenant_context(session: AsyncSession, tenant_id: str, is_superuser
         await session.execute(text("SET LOCAL app.is_superuser = 'true'"))
     else:
         await session.execute(text("SET LOCAL app.is_superuser = 'false'"))
+
+async def reset_tenant_context(session: AsyncSession):
+    """
+    Explicitly resets the tenant RLS context between transactions/connections
+    to prevent connection-pool leakage across subsequent requests.
+    """
+    try:
+        await session.execute(text("RESET app.current_tenant_id"))
+        await session.execute(text("RESET app.is_superuser"))
+    except Exception:
+        pass
+

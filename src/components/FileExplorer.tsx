@@ -52,6 +52,7 @@ interface FileExplorerProps {
   onRenameFolder: (folder: Folder) => void;
   onTrashFolder: (folderId: string) => void;
   isTrashView?: boolean;
+  userRole?: 'OWNER' | 'EDITOR' | 'VIEWER' | 'GUEST';
 }
 
 export const FileExplorer: React.FC<FileExplorerProps> = ({
@@ -75,7 +76,9 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
   onRenameFolder,
   onTrashFolder,
   isTrashView = false,
+  userRole = 'OWNER',
 }) => {
+  const isReadOnly = userRole === 'VIEWER' || userRole === 'GUEST';
   const [filterCategory, setFilterCategory] = useState<string>('all');
   const [sortBy, setSortBy] = useState<'name' | 'date' | 'size'>('date');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
@@ -219,6 +222,16 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Read-Only RBAC Policy Indicator */}
+      {isReadOnly && (
+        <div className="mx-6 mt-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center space-x-2.5 text-xs text-amber-300 animate-in fade-in">
+          <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+          <span>
+            <strong>Contrôle RBAC actif ({userRole}) :</strong> Vous disposez d'un accès en lecture seule à cet espace documentaire. Les imports, modifications et suppressions sont verrouillés côté backend.
+          </span>
+        </div>
+      )}
 
       {/* Multi-selection banner */}
       {selectedDocIds.length > 0 && (

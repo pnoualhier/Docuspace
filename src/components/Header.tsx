@@ -11,7 +11,9 @@ import {
   Layers, 
   CheckCircle2,
   Sparkles,
-  HelpCircle
+  HelpCircle,
+  ShieldAlert,
+  Users
 } from 'lucide-react';
 import { User, Tenant, Plan } from '../types';
 import { formatBytes } from '../services/crypto';
@@ -27,6 +29,8 @@ interface HeaderProps {
   onSwitchUser: (userId: string) => void;
   onOpenArchitecture: () => void;
   onOpenUpload: () => void;
+  onOpenSecuritySimulator: () => void;
+  onOpenMembers: () => void;
   onLogout: () => void;
   allUsers: User[];
 }
@@ -42,6 +46,8 @@ export const Header: React.FC<HeaderProps> = ({
   onSwitchUser,
   onOpenArchitecture,
   onOpenUpload,
+  onOpenSecuritySimulator,
+  onOpenMembers,
   onLogout,
   allUsers,
 }) => {
@@ -177,6 +183,26 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
         </div>
+
+        {/* Security & RLS Simulator button */}
+        <button
+          onClick={onOpenSecuritySimulator}
+          className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-semibold transition-all shadow-sm"
+          title="Tester l'isolation RLS et simuler des attaques IDOR"
+        >
+          <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
+          <span className="hidden lg:inline">Simulateur RLS</span>
+        </button>
+
+        {/* Tenant Members RBAC button */}
+        <button
+          onClick={onOpenMembers}
+          className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors"
+          title="Gérer les membres et rôles RBAC de cet espace"
+        >
+          <Users className="w-3.5 h-3.5 text-blue-400" />
+          <span className="hidden xl:inline">Membres ({currentTenant.role})</span>
+        </button>
 
         {/* Architecture & API explorer button */}
         <button

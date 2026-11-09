@@ -57,3 +57,17 @@ class StorageUsage(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     tenant = relationship("Tenant", back_populates="storage_usage")
+
+class PermissionModel(Base):
+    __tablename__ = "permissions"
+
+    code = Column(String(64), primary_key=True) # e.g. 'document:read', 'document:write'
+    name = Column(String(128), nullable=False)
+    description = Column(String(255), nullable=True)
+
+class RolePermission(Base):
+    __tablename__ = "role_permissions"
+
+    role_name = Column(String(32), ForeignKey("roles.name", ondelete="CASCADE"), primary_key=True)
+    permission_code = Column(String(64), ForeignKey("permissions.code", ondelete="CASCADE"), primary_key=True)
+

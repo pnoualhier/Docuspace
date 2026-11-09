@@ -1,16 +1,59 @@
-from typing import Optional
+from enum import Enum
+from typing import Optional, Set
 from uuid import UUID
 from fastapi import Depends, HTTPException, status, Header, Cookie
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from jose import JWTError
-from backend.app.core.database import get_db, set_tenant_context
+from backend.app.core.database import get_db, set_tenant_context, reset_tenant_context
 from backend.app.core.security import decode_token
 from backend.app.models.user import User
 from backend.app.models.tenant import Tenant, TenantMember
 
 security = HTTPBearer(auto_error=False)
+
+class Permission(str, Enum):
+    DOCUMENT_READ = "document:read"
+    DOCUMENT_WRITE = "document:write"
+    DOCUMENT_DELETE = "document:delete"
+    DOCUMENT_SHARE = "document:share"
+    DOCUMENT_RESTORE = "document:restore"
+    FOLDER_CREATE = "folder:create"
+    FOLDER_MANAGE = "folder:manage"
+    MEMBER_INVITE = "member:invite"
+    MEMBER_MANAGE = "member:manage"
+    TENANT_SETTINGS = "tenant:settings"
+    AUDIT_READ = "audit:read"
+
+ROLE_PERMISSIONS: dict[str, Set[Permission]] = {
+    "OWNER": {
+        Permission.DOCUMENT_READ,
+        Permission.DOCUMENT_WRITE,
+        Permission.DOCUMENT_DELETE,
+        Permission.DOCUMENT_SHARE,
+        Permission.DOCUMENT_RESTORE,
+        Permission.FOLDER_CREATE,
+        Permission.FOLDER_MANAGE,
+        Permission.MEMBER_INVITE,
+        Permission.MEMBER_MANAGE,
+        Permission.TENANT_SETTINGS,
+        Permission.AUDIT_READ,
+    },
+    "EDITOR": {
+        Permission.DOCUMENT_READ,
+        Permission.DOCUMENT_WRITE,
+        Permission.DOCUMENT_SHARE,
+        Permission.FOLDER_CREATE,
+        Permission.FOLDER_MANAGE,
+    },
+    "VIEWER": {
+        Permission.DOCUMENT_READ,
+    },
+    "GUEST": {
+        Permission.DOCUMENT_READ,
+    },
+}
 
 class TenantContext:
     def __init__(self, user: User, tenant: Tenant, role: str, db: AsyncSession):
@@ -18,6 +61,12 @@ class TenantContext:
         self.tenant = tenant
         self.role = role
         self.db = db
+
+    def has_permission(self, permission: Permission) -> bool:
+        if self.user.is_superuser:
+            return True
+        allowed = ROLE_PERMISSIONS.get(self.role, set())
+        return permission in allowed
 
 async def get_current_user(
     auth_header: Optional[HTTPAuthorizationCredentials] = Depends(security),
@@ -59,7 +108,7 @@ async def get_current_tenant_context(
     db: AsyncSession = Depends(get_db)
 ) -> TenantContext:
     """
-    Guarantees strict multi-tenant isolation.
+    Guarantees strict multi-tenant isolation and prevents cross-tenant access.
     1. Checks if the requested tenant exists and the user is verified member.
     2. Fallbacks safely to the user's personal owned tenant if no header provided.
     3. Injects PostgreSQL Row-Level Security (RLS) variable via `SET LOCAL app.current_tenant_id`.
@@ -69,7 +118,7 @@ async def get_current_tenant_context(
         try:
             target_tenant_id = UUID(x_tenant_id)
         except ValueError:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Identifiant de tenant invalide")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Format d'identifiant de tenant invalide")
 
     if target_tenant_id:
         membership_query = await db.execute(
@@ -83,14 +132,17 @@ async def get_current_tenant_context(
         )
         row = membership_query.first()
         if not row:
-            # If user is superuser, allow explicit read with owner rights
+            # If user is superuser, allow explicit read with audited owner rights
             if current_user.is_superuser:
                 tenant_q = await db.execute(select(Tenant).where(Tenant.id == target_tenant_id))
                 t = tenant_q.scalar_one_or_none()
                 if t:
                     await set_tenant_context(db, str(t.id), is_superuser=True)
                     return TenantContext(user=current_user, tenant=t, role="OWNER", db=db)
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Accès refusé à cet espace documentaire")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, 
+                detail="Accès interdit : vous n'êtes pas membre de cet espace documentaire ou tentative de violation d'isolation RLS."
+            )
         member, tenant = row
         role = member.role
     else:
@@ -107,3 +159,17 @@ async def get_current_tenant_context(
     await set_tenant_context(db, str(tenant.id), is_superuser=current_user.is_superuser)
 
     return TenantContext(user=current_user, tenant=tenant, role=role, db=db)
+
+def require_permission(required_perm: Permission):
+    """
+    Enforces granular RBAC permissions on endpoints.
+    Denies access with 403 Forbidden if user role does not possess the capability.
+    """
+    async def permission_checker(ctx: TenantContext = Depends(get_current_tenant_context)):
+        if not ctx.has_permission(required_perm):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission insuffisante : l'action requiert '{required_perm.value}', votre rôle est '{ctx.role}'."
+            )
+        return ctx
+    return permission_checker
