@@ -1,7 +1,7 @@
 import uuid
 from typing import List, Optional, Dict
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Path
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_, func, update
@@ -20,6 +20,16 @@ from backend.app.schemas.document import (
     BulkDocumentActionRequest,
     BulkOperationResult
 )
+from backend.app.schemas.version import (
+    VersionCreate,
+    VersionRead,
+    VersionRestoreResponse,
+    VersionPurgeResponse,
+    TrashItemRead,
+    TrashPurgeSummary
+)
+from backend.app.services.preview_service import preview_service
+from backend.app.services.quota_service import quota_service
 from backend.app.middleware.tenant_context import (
     get_current_tenant_context, 
     TenantContext, 
@@ -564,3 +574,353 @@ async def bulk_purge_documents(
         message=f"{del_count} document(s) définitivement purgé(s). {freed_bytes} octets libérés.",
         affected_ids=[d.id for d in docs]
     )
+
+# =========================================================================
+# 4. GESTION DES VERSIONS & RESTAURATION (PHASE 6)
+# =========================================================================
+
+@router.get("/documents/{id}/versions", response_model=List[VersionRead], tags=["Versions & Révisions"])
+async def list_document_versions(
+    id: UUID = Path(...),
+    ctx: TenantContext = Depends(require_permission(Permission.DOCUMENT_READ))
+):
+    """Retourne l'historique complet des versions pour un document donné."""
+    doc_q = await ctx.db.execute(
+        select(Document).where(
+            Document.id == id,
+            Document.tenant_id == ctx.tenant.id
+        )
+    )
+    doc = doc_q.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document introuvable.")
+
+    versions_q = await ctx.db.execute(
+        select(DocumentVersion).where(
+            DocumentVersion.document_id == id,
+            DocumentVersion.tenant_id == ctx.tenant.id
+        ).order_by(DocumentVersion.version_number.desc())
+    )
+    return versions_q.scalars().all()
+
+@router.post("/documents/{id}/versions", response_model=VersionRead, status_code=status.HTTP_201_CREATED, tags=["Versions & Révisions"])
+async def create_document_version(
+    payload: VersionCreate,
+    id: UUID = Path(...),
+    ctx: TenantContext = Depends(require_permission(Permission.DOCUMENT_WRITE))
+):
+    """
+    Ajoute une nouvelle révision d'un document existant :
+    - Contrôle du plafond de versions par fichier selon le forfait (Plan.max_versions_per_file)
+    - Enregistrement de la nouvelle version avec son empreinte SHA-256
+    - Mise à jour atomique des métadonnées du document principal
+    """
+    doc_q = await ctx.db.execute(
+        select(Document).where(
+            Document.id == id,
+            Document.tenant_id == ctx.tenant.id,
+            Document.is_trashed == False
+        )
+    )
+    doc = doc_q.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document actif introuvable.")
+
+    # Determine max version number
+    max_ver_q = await ctx.db.execute(
+        select(func.coalesce(func.max(DocumentVersion.version_number), 0))
+        .where(DocumentVersion.document_id == id)
+    )
+    current_max_ver = max_ver_q.scalar() or 0
+    next_ver = current_max_ver + 1
+
+    # Check max versions per file limit (default 10)
+    max_allowed = 10
+    total_versions_q = await ctx.db.execute(
+        select(func.count(DocumentVersion.id)).where(DocumentVersion.document_id == id)
+    )
+    total_versions = total_versions_q.scalar() or 0
+    if total_versions >= max_allowed:
+        # Purge oldest intermediate version to make room
+        oldest_ver_q = await ctx.db.execute(
+            select(DocumentVersion).where(
+                DocumentVersion.document_id == id
+            ).order_by(DocumentVersion.version_number.asc()).limit(1)
+        )
+        oldest = oldest_ver_q.scalar_one_or_none()
+        if oldest and oldest.version_number < current_max_ver:
+            await ctx.db.delete(oldest)
+
+    storage_key = f"tenants/{ctx.tenant.id}/{doc.id}_v{next_ver}.{doc.extension}"
+
+    new_version = DocumentVersion(
+        id=uuid.uuid4(),
+        document_id=doc.id,
+        tenant_id=ctx.tenant.id,
+        version_number=next_ver,
+        storage_key=storage_key,
+        size_bytes=payload.size_bytes,
+        mime_type=payload.mime_type,
+        sha256_hash=payload.sha256_hash,
+        change_summary=payload.change_summary,
+        created_by=ctx.user.id
+    )
+
+    # Update document master properties
+    doc.size_bytes = payload.size_bytes
+    doc.sha256_hash = payload.sha256_hash
+    doc.mime_type = payload.mime_type
+    doc.storage_key = storage_key
+    doc.updated_at = datetime.now(timezone.utc)
+
+    ctx.db.add(new_version)
+    await ctx.db.commit()
+    await ctx.db.refresh(new_version)
+    return new_version
+
+@router.post("/documents/{id}/versions/{version_id}/restore", response_model=VersionRestoreResponse, tags=["Versions & Révisions"])
+async def restore_document_version(
+    id: UUID = Path(...),
+    version_id: UUID = Path(...),
+    ctx: TenantContext = Depends(require_permission(Permission.DOCUMENT_WRITE))
+):
+    """Restaure un document vers une version antérieure."""
+    ver_q = await ctx.db.execute(
+        select(DocumentVersion).where(
+            DocumentVersion.id == version_id,
+            DocumentVersion.document_id == id,
+            DocumentVersion.tenant_id == ctx.tenant.id
+        )
+    )
+    ver = ver_q.scalar_one_or_none()
+    if not ver:
+        raise HTTPException(status_code=404, detail="Version demandée introuvable.")
+
+    doc_q = await ctx.db.execute(
+        select(Document).where(
+            Document.id == id,
+            Document.tenant_id == ctx.tenant.id
+        )
+    )
+    doc = doc_q.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document introuvable.")
+
+    doc.size_bytes = ver.size_bytes
+    doc.sha256_hash = ver.sha256_hash
+    doc.mime_type = ver.mime_type
+    doc.storage_key = ver.storage_key
+    doc.updated_at = datetime.now(timezone.utc)
+
+    await ctx.db.commit()
+
+    return VersionRestoreResponse(
+        document_id=doc.id,
+        restored_version_number=ver.version_number,
+        size_bytes=ver.size_bytes,
+        sha256_hash=ver.sha256_hash,
+        message=f"Document restauré avec succès vers la version {ver.version_number}."
+    )
+
+@router.delete("/documents/{id}/versions/{version_id}", response_model=VersionPurgeResponse, tags=["Versions & Révisions"])
+async def purge_document_version(
+    id: UUID = Path(...),
+    version_id: UUID = Path(...),
+    ctx: TenantContext = Depends(require_permission(Permission.DOCUMENT_DELETE))
+):
+    """Purger une version intermédiaire et récupérer l'espace quota associé."""
+    ver_q = await ctx.db.execute(
+        select(DocumentVersion).where(
+            DocumentVersion.id == version_id,
+            DocumentVersion.document_id == id,
+            DocumentVersion.tenant_id == ctx.tenant.id
+        )
+    )
+    ver = ver_q.scalar_one_or_none()
+    if not ver:
+        raise HTTPException(status_code=404, detail="Version introuvable.")
+
+    # Check total versions remaining
+    cnt_q = await ctx.db.execute(
+        select(func.count(DocumentVersion.id)).where(DocumentVersion.document_id == id)
+    )
+    total = cnt_q.scalar() or 0
+    if total <= 1:
+        raise HTTPException(status_code=400, detail="Impossible de supprimer la seule version existante du document.")
+
+    freed = ver.size_bytes
+    await ctx.db.delete(ver)
+
+    # Reclaim storage
+    await ctx.db.execute(
+        update(StorageUsage)
+        .where(StorageUsage.tenant_id == ctx.tenant.id)
+        .values(used_bytes=func.greatest(0, StorageUsage.used_bytes - freed))
+    )
+    await ctx.db.commit()
+
+    return VersionPurgeResponse(
+        purged_version_id=version_id,
+        freed_bytes=freed,
+        remaining_version_count=total - 1,
+        message=f"Version supprimée. {freed} octets récupérés sur votre quota."
+    )
+
+# =========================================================================
+# 5. CORBEILLE AVANCÉE & RÉTENTION 30 JOURS (PHASE 6)
+# =========================================================================
+
+@router.get("/trash", response_model=List[TrashItemRead], tags=["Corbeille & Rétention"])
+async def list_trash_items(
+    ctx: TenantContext = Depends(require_permission(Permission.DOCUMENT_READ))
+):
+    """
+    Retourne la liste des éléments placés en corbeille avec calcul du compte à rebours de rétention (30 jours).
+    """
+    now = datetime.now(timezone.utc)
+    docs_q = await ctx.db.execute(
+        select(Document).where(
+            Document.tenant_id == ctx.tenant.id,
+            Document.is_trashed == True
+        )
+    )
+    docs = docs_q.scalars().all()
+
+    flds_q = await ctx.db.execute(
+        select(Folder).where(
+            Folder.tenant_id == ctx.tenant.id,
+            Folder.is_trashed == True
+        )
+    )
+    folders = flds_q.scalars().all()
+
+    items: List[TrashItemRead] = []
+
+    for d in docs:
+        trashed_at = d.trashed_at or now
+        diff_days = (now - trashed_at).days
+        days_left = max(0, 30 - diff_days)
+        items.append(TrashItemRead(
+            id=d.id,
+            item_type="DOCUMENT",
+            name=d.original_name,
+            size_bytes=d.size_bytes,
+            trashed_at=trashed_at,
+            days_remaining=days_left,
+            can_restore=True
+        ))
+
+    for f in folders:
+        trashed_at = f.trashed_at or now
+        diff_days = (now - trashed_at).days
+        days_left = max(0, 30 - diff_days)
+        items.append(TrashItemRead(
+            id=f.id,
+            item_type="FOLDER",
+            name=f.name,
+            size_bytes=None,
+            trashed_at=trashed_at,
+            days_remaining=days_left,
+            can_restore=True
+        ))
+
+    return items
+
+@router.post("/trash/empty", response_model=TrashPurgeSummary, tags=["Corbeille & Rétention"])
+async def empty_trash(
+    ctx: TenantContext = Depends(require_permission(Permission.DOCUMENT_DELETE))
+):
+    """Vide l'intégralité de la corbeille pour le tenant actif et libère le quota."""
+    docs_q = await ctx.db.execute(
+        select(Document).where(
+            Document.tenant_id == ctx.tenant.id,
+            Document.is_trashed == True
+        )
+    )
+    docs = docs_q.scalars().all()
+    freed_bytes = sum(d.size_bytes for d in docs)
+    del_docs_count = len(docs)
+
+    for d in docs:
+        await ctx.db.delete(d)
+
+    flds_q = await ctx.db.execute(
+        select(Folder).where(
+            Folder.tenant_id == ctx.tenant.id,
+            Folder.is_trashed == True
+        )
+    )
+    folders = flds_q.scalars().all()
+    del_flds_count = len(folders)
+    for f in folders:
+        await ctx.db.delete(f)
+
+    # Reclaim storage
+    if freed_bytes > 0:
+        await ctx.db.execute(
+            update(StorageUsage)
+            .where(StorageUsage.tenant_id == ctx.tenant.id)
+            .values(
+                used_bytes=func.greatest(0, StorageUsage.used_bytes - freed_bytes),
+                document_count=func.greatest(0, StorageUsage.document_count - del_docs_count)
+            )
+        )
+
+    await ctx.db.commit()
+
+    return TrashPurgeSummary(
+        purged_documents_count=del_docs_count,
+        purged_folders_count=del_flds_count,
+        freed_bytes=freed_bytes,
+        message=f"Corbeille vidée : {del_docs_count} fichier(s) et {del_flds_count} dossier(s) détruits. {freed_bytes} octets libérés."
+    )
+
+@router.post("/trash/auto-purge", response_model=TrashPurgeSummary, tags=["Corbeille & Rétention"])
+async def auto_purge_expired_trash(
+    ctx: TenantContext = Depends(require_permission(Permission.DOCUMENT_DELETE))
+):
+    """Tâche de purge automatique des éléments en corbeille depuis plus de 30 jours."""
+    threshold = datetime.now(timezone.utc) - timedelta(days=30)
+
+    docs_q = await ctx.db.execute(
+        select(Document).where(
+            Document.tenant_id == ctx.tenant.id,
+            Document.is_trashed == True,
+            Document.trashed_at <= threshold
+        )
+    )
+    docs = docs_q.scalars().all()
+    freed = sum(d.size_bytes for d in docs)
+    for d in docs:
+        await ctx.db.delete(d)
+
+    flds_q = await ctx.db.execute(
+        select(Folder).where(
+            Folder.tenant_id == ctx.tenant.id,
+            Folder.is_trashed == True,
+            Folder.trashed_at <= threshold
+        )
+    )
+    flds = flds_q.scalars().all()
+    for f in flds:
+        await ctx.db.delete(f)
+
+    if freed > 0:
+        await ctx.db.execute(
+            update(StorageUsage)
+            .where(StorageUsage.tenant_id == ctx.tenant.id)
+            .values(
+                used_bytes=func.greatest(0, StorageUsage.used_bytes - freed),
+                document_count=func.greatest(0, StorageUsage.document_count - len(docs))
+            )
+        )
+
+    await ctx.db.commit()
+
+    return TrashPurgeSummary(
+        purged_documents_count=len(docs),
+        purged_folders_count=len(flds),
+        freed_bytes=freed,
+        message=f"Purge automatique des 30 jours exécutée : {len(docs)} document(s) et {len(flds)} dossier(s) purgés."
+    )
+

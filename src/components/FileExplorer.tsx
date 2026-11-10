@@ -64,6 +64,7 @@ interface FileExplorerProps {
   onBulkTrash: (docIds: string[]) => void;
   onBulkRestore?: (docIds: string[]) => void;
   onBulkPurge?: (docIds: string[]) => void;
+  onEmptyTrash?: () => void;
   isTrashView?: boolean;
   userRole?: 'OWNER' | 'EDITOR' | 'VIEWER' | 'GUEST';
 }
@@ -97,6 +98,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
   onBulkTrash,
   onBulkRestore,
   onBulkPurge,
+  onEmptyTrash,
   isTrashView = false,
   userRole = 'OWNER',
 }) => {
@@ -258,6 +260,18 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
 
         {/* Action Controls & Filters */}
         <div className="flex items-center space-x-3 shrink-0">
+          {/* Empty Trash Button */}
+          {isTrashView && onEmptyTrash && (sortedDocs.length > 0 || folders.length > 0) && (
+            <button
+              onClick={onEmptyTrash}
+              className="px-3 py-1.5 rounded-lg bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 text-xs font-medium flex items-center space-x-1.5 transition-colors shadow-sm"
+              title="Vider intégralement la corbeille et libérer le quota de stockage"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+              <span>Vider la corbeille</span>
+            </button>
+          )}
+
           {/* Advanced Search Toggle */}
           <button
             onClick={() => setShowAdvancedSearch(!showAdvancedSearch)}
@@ -611,6 +625,12 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
                           sha256:{doc.sha256Hash.substring(0, 8)}...
                         </span>
                       </div>
+                      {isTrashView && (
+                        <div className="mt-2 flex items-center space-x-1.5 px-2 py-0.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[10px] font-medium w-fit">
+                          <Clock className="w-3 h-3 text-amber-400 shrink-0" />
+                          <span>Purge auto dans {Math.max(0, 30 - Math.floor((Date.now() - new Date(doc.trashedAt || doc.updatedAt).getTime()) / (1000 * 3600 * 24)))}j</span>
+                        </div>
+                      )}
                     </div>
 
                     {/* Footer: Date & Quick Actions */}
@@ -740,6 +760,12 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
                                 <span className="ml-2 px-1.5 py-0.2 rounded bg-purple-500/10 text-purple-400 text-[10px] font-mono">
                                   v{doc.versions[0].versionNumber}
                                 </span>
+                              )}
+                              {isTrashView && (
+                                <div className="flex items-center space-x-1 text-[10px] text-amber-400/90 mt-0.5 font-medium">
+                                  <Clock className="w-3 h-3" />
+                                  <span>Purge auto dans {Math.max(0, 30 - Math.floor((Date.now() - new Date(doc.trashedAt || doc.updatedAt).getTime()) / (1000 * 3600 * 24)))}j</span>
+                                </div>
                               )}
                             </div>
                           </div>

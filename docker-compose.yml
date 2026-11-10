@@ -106,7 +106,7 @@ services:
       redis:
         condition: service_healthy
     env_file:
-      - docker.env
+      - ./infrastructure/docker/docker.env
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-docuspace_user}:${POSTGRES_PASSWORD:-1931f981e26267c862f352c516b5f2bb}@postgres:5432/${POSTGRES_DB:-docuspace}
       MINIO_ENDPOINT: minio:9000

@@ -552,6 +552,107 @@ export default function App() {
     logAction('DOC_VERSION_RESTORE', 'DOCUMENT', doc.originalName, `Restauration de la version ${version.versionNumber}`);
   };
 
+  const handleCreateVersion = (doc: DocumentItem, newVersion: DocumentVersion) => {
+    setDocuments(prev => prev.map(d => {
+      if (d.id === doc.id) {
+        return {
+          ...d,
+          sizeBytes: newVersion.sizeBytes,
+          sha256Hash: newVersion.sha256Hash,
+          mimeType: newVersion.mimeType,
+          updatedAt: new Date().toISOString(),
+          versions: [newVersion, ...d.versions]
+        };
+      }
+      return d;
+    }));
+
+    // Update tenant storage quota
+    setTenants(prev => prev.map(t => {
+      if (t.id === doc.tenantId) {
+        return {
+          ...t,
+          usedBytes: (t.usedBytes || 0) + newVersion.sizeBytes,
+        };
+      }
+      return t;
+    }));
+
+    // Keep active modal in sync
+    setVersionsDoc(prev => prev ? {
+      ...prev,
+      sizeBytes: newVersion.sizeBytes,
+      sha256Hash: newVersion.sha256Hash,
+      mimeType: newVersion.mimeType,
+      versions: [newVersion, ...prev.versions]
+    } : null);
+
+    logAction('DOC_VERSION_CREATE', 'DOCUMENT', doc.originalName, `Nouvelle révision v${newVersion.versionNumber} (${formatBytes(newVersion.sizeBytes)})`);
+  };
+
+  const handlePurgeVersion = (doc: DocumentItem, versionId: string) => {
+    const versionToPurge = doc.versions.find(v => v.id === versionId);
+    if (!versionToPurge) return;
+
+    setDocuments(prev => prev.map(d => {
+      if (d.id === doc.id) {
+        return {
+          ...d,
+          versions: d.versions.filter(v => v.id !== versionId)
+        };
+      }
+      return d;
+    }));
+
+    // Reclaim storage quota
+    setTenants(prev => prev.map(t => {
+      if (t.id === doc.tenantId) {
+        return {
+          ...t,
+          usedBytes: Math.max(0, (t.usedBytes || 0) - versionToPurge.sizeBytes)
+        };
+      }
+      return t;
+    }));
+
+    setVersionsDoc(prev => prev ? {
+      ...prev,
+      versions: prev.versions.filter(v => v.id !== versionId)
+    } : null);
+
+    logAction('DOC_VERSION_PURGE', 'DOCUMENT', doc.originalName, `Purge de la version v${versionToPurge.versionNumber} (${formatBytes(versionToPurge.sizeBytes)} libérés)`);
+  };
+
+  const handleEmptyTrash = () => {
+    const trashedDocs = tenantDocs.filter(d => d.isTrashed);
+    const trashedFlds = tenantFolders.filter(f => f.isTrashed);
+    if (trashedDocs.length === 0 && trashedFlds.length === 0) return;
+
+    if (!window.confirm(`Êtes-vous sûr de vouloir vider la corbeille ? ${trashedDocs.length} fichier(s) et ${trashedFlds.length} dossier(s) seront définitivement purgés.`)) {
+      return;
+    }
+
+    const totalBytesFreed = trashedDocs.reduce((acc, curr) => acc + curr.sizeBytes, 0);
+
+    // Remove trashed documents & folders
+    setDocuments(prev => prev.filter(d => !(d.tenantId === currentTenant.id && d.isTrashed)));
+    setFolders(prev => prev.filter(f => !(f.tenantId === currentTenant.id && f.isTrashed)));
+
+    // Reclaim storage quota
+    setTenants(prev => prev.map(t => {
+      if (t.id === currentTenant.id) {
+        return {
+          ...t,
+          usedBytes: Math.max(0, (t.usedBytes || 0) - totalBytesFreed),
+          documentCount: Math.max(0, (t.documentCount || 0) - trashedDocs.length)
+        };
+      }
+      return t;
+    }));
+
+    logAction('TRASH_EMPTY', 'TENANT', currentTenant.name, `Corbeille entièrement vidée (${formatBytes(totalBytesFreed)} libérés)`);
+  };
+
   const handleUpgradePlan = (planId: PlanType) => {
     setTenants(prev => prev.map(t => {
       if (t.id === currentTenant.id) {
@@ -791,6 +892,7 @@ export default function App() {
               onBulkTrash={handleBulkTrash}
               onBulkRestore={handleBulkRestore}
               onBulkPurge={handleBulkPurge}
+              onEmptyTrash={handleEmptyTrash}
               isTrashView={currentTab === 'trash'}
               userRole={currentTenant.role}
             />
@@ -831,6 +933,8 @@ export default function App() {
         document={versionsDoc}
         onClose={() => setVersionsDoc(null)}
         onRestoreVersion={handleRestoreVersion}
+        onCreateVersion={handleCreateVersion}
+        onPurgeVersion={handlePurgeVersion}
       />
 
       <FolderModal

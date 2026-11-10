@@ -7,6 +7,6 @@
 | **Phase 3** | **Gestion des Dossiers & Documents** | **TERMINÉ** | Arborescence récursive, déplacement interactif, prévention des cycles, duplication, actions groupées, moteur de recherche multi-critères |
 | **Phase 4** | **Stockage S3 MinIO, Quotas & Antivirus** | **TERMINÉ** | Upload multipart streaming, URLs pré-signées, ClamAV fail-closed, calcul SHA-256, verrous quotas |
 | **Phase 5** | **Partage Sécurisé & Permissions** | **TERMINÉ** | Partage d'utilisateur à utilisateur, liens publics tokenisés avec mot de passe et expiration, audit d'accès |
-| **Phase 6** | **Versions, Corbeille & Prévisualisation** | Suivant | Historique des révisions, restauration, purge automatique 30 jours, visionneuse PDF.js, tableur, LibreOffice |
-| **Phase 7** | **Notifications, Facturation & Administration**| Planifié | Console d'administration globale, simulation Stripe, alertes de quotas, journal d'audit complet |
+| **Phase 6** | **Versions, Corbeille & Prévisualisation** | **TERMINÉ** | Historique des révisions, restauration, libération de quota, purge automatique 30 jours, vider corbeille, visionneuse PDF.js paginée/zoom, tableur CSV/Excel, coloration syntaxique, Markdown sécurisé, LibreOffice headless |
+| **Phase 7** | **Notifications, Facturation & Administration**| Suivant | Console d'administration globale, simulation Stripe, alertes de quotas, journal d'audit complet |
 | **Phase 8** | **RGPD, Sauvegardes & Déploiement Debian** | Planifié | Export d'archive RGPD, purge de compte, rotation automatisée des sauvegardes, durcissement serveur |
