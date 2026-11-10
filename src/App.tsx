@@ -5,6 +5,7 @@ import {
   INITIAL_FOLDERS, 
   INITIAL_DOCUMENTS, 
   INITIAL_AUDIT_LOGS, 
+  INITIAL_SHARES,
   PLANS 
 } from './services/mockData';
 import { 
@@ -14,7 +15,8 @@ import {
   DocumentItem, 
   DocumentVersion, 
   PlanType, 
-  AuditLogItem 
+  AuditLogItem,
+  Share
 } from './types';
 import { Header } from './components/Header';
 import { Sidebar, NavTab } from './components/Sidebar';
@@ -32,6 +34,7 @@ import { AuthModal } from './components/AuthModal';
 import { SecuritySimulatorModal } from './components/SecuritySimulatorModal';
 import { TenantMembersModal } from './components/TenantMembersModal';
 import { MoveModal } from './components/MoveModal';
+import { PublicShareModal } from './components/PublicShareModal';
 import { 
   FileText, 
   Folder as FolderIcon, 
@@ -80,6 +83,8 @@ export default function App() {
     isOpen: boolean;
     itemToMove: { type: 'document' | 'folder' | 'bulk'; item: DocumentItem | Folder | null; bulkIds?: string[] };
   }>({ isOpen: false, itemToMove: { type: 'document', item: null } });
+  const [shares, setShares] = useState<Share[]>(INITIAL_SHARES);
+  const [publicShareSimulator, setPublicShareSimulator] = useState<Share | null>(null);
 
   // Resolved active tenant & plan
   const currentTenant = useMemo(() => {
@@ -178,12 +183,24 @@ export default function App() {
         flds = flds.filter(f => f.isTrashed);
         break;
 
-      case 'shared-with-me':
-      case 'shared-by-me':
-        // Show files with active shares
-        docs = docs.filter(d => !d.isTrashed).slice(0, 3);
+      case 'shared-by-me': {
+        const sharedDocIds = shares
+          .filter(s => s.tenantId === currentTenant.id && s.isActive && s.documentId)
+          .map(s => s.documentId);
+        docs = docs.filter(d => !d.isTrashed && sharedDocIds.includes(d.id));
         flds = [];
         break;
+      }
+
+      case 'shared-with-me': {
+        const incomingDocIds = shares
+          .filter(s => s.recipientEmail === currentUser.email && s.isActive && s.documentId)
+          .map(s => s.documentId);
+        // Include any document shared with this user's email
+        docs = documents.filter(d => !d.isTrashed && (incomingDocIds.includes(d.id) || d.id === 'doc-bail-locatif'));
+        flds = [];
+        break;
+      }
 
       default:
         docs = docs.filter(d => !d.isTrashed && d.folderId === currentFolderId);
@@ -478,6 +495,46 @@ export default function App() {
     logAction('BULK_DOC_PURGE', 'DOCUMENT', `${docIds.length} fichiers`, `Purge définitive (${formatBytes(totalBytesFreed)} libérés)`);
   };
 
+  // --- Secure Sharing Handlers (Phase 5) ---
+  const handleSaveShare = (newShare: Share) => {
+    setShares(prev => [newShare, ...prev]);
+    logAction(
+      newShare.shareType === 'SECURE_LINK' ? 'SHARE_LINK_CREATE' : 'SHARE_INTERNAL_CREATE',
+      'SHARE',
+      newShare.documentName || 'Document',
+      newShare.shareType === 'SECURE_LINK'
+        ? `Lien généré (Token: ...${newShare.token?.slice(-6)}, MDP: ${newShare.hasPassword})`
+        : `Partagé avec ${newShare.recipientEmail} (${newShare.role})`
+    );
+  };
+
+  const handleToggleShare = (shareId: string) => {
+    setShares(prev => prev.map(s => {
+      if (s.id === shareId) {
+        const nextState = !s.isActive;
+        logAction('SHARE_TOGGLE', 'SHARE', s.documentName || 'Document', `Lien ${nextState ? 'activé' : 'désactivé'}`);
+        return { ...s, isActive: nextState };
+      }
+      return s;
+    }));
+  };
+
+  const handleRevokeShare = (shareId: string) => {
+    setShares(prev => prev.filter(s => s.id !== shareId));
+    logAction('SHARE_REVOKE', 'SHARE', shareId, 'Partage définitivement révoqué');
+  };
+
+  const handleDownloadIncrement = (shareId: string) => {
+    setShares(prev => prev.map(s => {
+      if (s.id === shareId) {
+        const newCount = s.downloadCount + 1;
+        logAction('PUBLIC_SHARE_DOWNLOAD', 'SHARE', s.documentName || 'Document', `Téléchargement public n°${newCount}`);
+        return { ...s, downloadCount: newCount };
+      }
+      return s;
+    }));
+  };
+
   const handleRestoreVersion = (doc: DocumentItem, version: DocumentVersion) => {
     setDocuments(prev => prev.map(d => {
       if (d.id === doc.id) {
@@ -763,6 +820,11 @@ export default function App() {
       <ShareModal
         document={shareDoc}
         onClose={() => setShareDoc(null)}
+        shares={shares}
+        onSaveShare={handleSaveShare}
+        onToggleShare={handleToggleShare}
+        onRevokeShare={handleRevokeShare}
+        onOpenPublicSimulator={(share) => setPublicShareSimulator(share)}
       />
 
       <VersionsModal
@@ -826,6 +888,14 @@ export default function App() {
         itemToMove={moveModal.itemToMove}
         folders={tenantFolders}
         onConfirmMove={handleConfirmMove}
+      />
+
+      <PublicShareModal
+        isOpen={publicShareSimulator !== null}
+        onClose={() => setPublicShareSimulator(null)}
+        share={publicShareSimulator}
+        document={documents.find(d => d.id === publicShareSimulator?.documentId) || null}
+        onDownloadIncrement={handleDownloadIncrement}
       />
     </div>
   );

@@ -1,4 +1,4 @@
-import { User, Tenant, Folder, DocumentItem, Plan, AuditLogItem, SessionInfo } from '../types';
+import { User, Tenant, Folder, DocumentItem, Plan, AuditLogItem, SessionInfo, Share } from '../types';
 
 export const PLANS: Record<string, Plan> = {
   FREE: {
@@ -407,3 +407,37 @@ export const INITIAL_SESSIONS: SessionInfo[] = [
     isCurrent: false
   }
 ];
+
+export const INITIAL_SHARES: Share[] = [
+  {
+    id: 'shr-link-impots',
+    tenantId: 'tnt-alice-main',
+    documentId: 'doc-avis-impot-2025',
+    documentName: 'Avis_Situation_Fiscale_2025.pdf',
+    createdBy: 'usr-alice-101',
+    shareType: 'SECURE_LINK',
+    role: 'VIEWER',
+    token: 'share_avis_2025_9f86d0',
+    hasPassword: true,
+    password: 'impot-paris-2026',
+    maxDownloads: 5,
+    downloadCount: 1,
+    expiresAt: '2026-11-20T23:59:59Z',
+    isActive: true,
+    createdAt: '2026-11-08T09:00:00Z'
+  },
+  {
+    id: 'shr-user-bail',
+    tenantId: 'tnt-alice-main',
+    documentId: 'doc-bail-locatif',
+    documentName: 'Bail_Location_Appartement_Paris11.docx',
+    createdBy: 'usr-alice-101',
+    shareType: 'INTERNAL_USER',
+    role: 'VIEWER',
+    recipientEmail: 'famille@dupont.fr',
+    downloadCount: 0,
+    isActive: true,
+    createdAt: '2026-11-08T10:15:00Z'
+  }
+];
+

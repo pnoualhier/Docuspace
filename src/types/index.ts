@@ -98,6 +98,8 @@ export interface Share {
   role: UserRole;
   token?: string;
   hasPassword?: boolean;
+  password?: string;
+  documentName?: string;
   maxDownloads?: number;
   downloadCount: number;
   expiresAt?: string;

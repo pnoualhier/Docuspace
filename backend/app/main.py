@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from backend.app.core.config import settings
-from backend.app.api.v1.routes import auth, health, tenants, documents, storage
+from backend.app.api.v1.routes import auth, health, tenants, documents, storage, shares
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -58,6 +58,7 @@ app.include_router(auth.router, prefix=f"{settings.API_V1_STR}/auth")
 app.include_router(tenants.router, prefix=f"{settings.API_V1_STR}/tenants")
 app.include_router(documents.router, prefix=f"{settings.API_V1_STR}/documents")
 app.include_router(storage.router, prefix=f"{settings.API_V1_STR}/storage")
+app.include_router(shares.router, prefix=f"{settings.API_V1_STR}/shares")
 
 @app.get("/", tags=["Racine"])
 async def root():
