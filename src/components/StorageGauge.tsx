@@ -9,7 +9,8 @@ import {
   CheckCircle2, 
   ShieldCheck, 
   Zap, 
-  Sparkles 
+  Sparkles,
+  AlertTriangle 
 } from 'lucide-react';
 import { Tenant, Plan, DocumentItem, PlanType } from '../types';
 import { formatBytes, getFileCategory } from '../services/crypto';
@@ -62,6 +63,20 @@ export const StorageGauge: React.FC<StorageGaugeProps> = ({
 
   return (
     <div className="flex-1 overflow-y-auto p-8 space-y-8 max-w-5xl mx-auto">
+      {/* Restricted Read-Only Grace Period Alert */}
+      {currentTenant.isRestrictedReadOnly && (
+        <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-start space-x-3 text-amber-200 text-xs animate-in fade-in">
+          <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <strong className="block text-amber-300 font-semibold">Espace restreint en lecture seule (Dépassement de quota) :</strong>
+            <p className="text-[11px] text-amber-200/90 leading-relaxed">
+              Votre stockage utilisé ({formatBytes(usedBytes)}) dépasse la capacité de votre forfait ({formatBytes(maxBytes)}).
+              Les ajouts de fichiers sont suspendus jusqu'à libération d'espace ou passage à une offre supérieure.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Top Header Card */}
       <div className="rounded-3xl p-8 bg-gradient-to-br from-slate-900 via-slate-900/90 to-slate-950 border border-slate-800 space-y-6 shadow-xl">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">

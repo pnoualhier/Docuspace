@@ -1,4 +1,4 @@
-import { User, Tenant, Folder, DocumentItem, Plan, AuditLogItem, SessionInfo, Share } from '../types';
+import { User, Tenant, Folder, DocumentItem, Plan, AuditLogItem, SessionInfo, Share, NotificationItem, InvoiceItem } from '../types';
 
 export const PLANS: Record<string, Plan> = {
   FREE: {
@@ -438,6 +438,75 @@ export const INITIAL_SHARES: Share[] = [
     downloadCount: 0,
     isActive: true,
     createdAt: '2026-11-08T10:15:00Z'
+  }
+];
+
+export const INITIAL_NOTIFICATIONS: NotificationItem[] = [
+  {
+    id: 'notif-001',
+    tenantId: 'tnt-alice-main',
+    userId: 'usr-alice-101',
+    category: 'SECURITY',
+    title: 'Nouvelle connexion confirmée',
+    message: 'Session ouverte sous Linux Debian / Firefox (IP: 192.168.1.45). Clés d\'accès vérifiées.',
+    level: 'INFO',
+    isRead: false,
+    createdAt: '2026-11-10T08:30:00Z'
+  },
+  {
+    id: 'notif-002',
+    tenantId: 'tnt-alice-main',
+    userId: 'usr-alice-101',
+    category: 'STORAGE',
+    title: 'Alerte Quota : 85% consommé',
+    message: 'Votre espace approche du plafond alloué (425 Mo / 500 Mo). Vérifiez vos fichiers volumineux ou vos forfaits.',
+    level: 'WARNING',
+    actionUrl: '/storage',
+    isRead: false,
+    createdAt: '2026-11-10T07:15:00Z'
+  },
+  {
+    id: 'notif-003',
+    tenantId: 'tnt-alice-main',
+    userId: 'usr-alice-101',
+    category: 'BILLING',
+    title: 'Reçu Stripe disponible',
+    message: 'Paiement mensuel validé avec succès pour le forfait Personnel (INV-2026-0042).',
+    level: 'SUCCESS',
+    isRead: true,
+    createdAt: '2026-11-01T10:00:00Z'
+  },
+  {
+    id: 'notif-004',
+    tenantId: 'tnt-alice-main',
+    userId: 'usr-alice-101',
+    category: 'SHARING',
+    title: 'Téléchargement de partage public',
+    message: 'Le document "Avis_Situation_Fiscale_2025.pdf" a été téléchargé avec succès par un tiers autorisé.',
+    level: 'INFO',
+    isRead: true,
+    createdAt: '2026-11-09T14:20:00Z'
+  }
+];
+
+export const INITIAL_INVOICES: InvoiceItem[] = [
+  {
+    id: 'inv-001',
+    number: 'INV-2026-0042',
+    amountEur: 4.99,
+    planName: 'DocuSpace Personnel',
+    interval: 'monthly',
+    status: 'PAID',
+    date: '2026-11-01T10:00:00Z'
+  },
+  {
+    id: 'inv-002',
+    number: 'INV-2026-0031',
+    amountEur: 4.99,
+    planName: 'DocuSpace Personnel',
+    interval: 'monthly',
+    status: 'PAID',
+    date: '2026-10-01T10:00:00Z'
   }
 ];
 

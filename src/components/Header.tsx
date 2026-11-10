@@ -13,7 +13,8 @@ import {
   Sparkles,
   HelpCircle,
   ShieldAlert,
-  Users
+  Users,
+  Bell
 } from 'lucide-react';
 import { User, Tenant, Plan } from '../types';
 import { formatBytes } from '../services/crypto';
@@ -31,6 +32,8 @@ interface HeaderProps {
   onOpenUpload: () => void;
   onOpenSecuritySimulator: () => void;
   onOpenMembers: () => void;
+  onOpenNotifications?: () => void;
+  unreadNotificationsCount?: number;
   onLogout: () => void;
   allUsers: User[];
 }
@@ -48,6 +51,8 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenUpload,
   onOpenSecuritySimulator,
   onOpenMembers,
+  onOpenNotifications,
+  unreadNotificationsCount = 0,
   onLogout,
   allUsers,
 }) => {
@@ -213,6 +218,22 @@ export const Header: React.FC<HeaderProps> = ({
           <Server className="w-3.5 h-3.5 text-indigo-400" />
           <span className="hidden sm:inline">Architecture & API</span>
         </button>
+
+        {/* Notifications Bell */}
+        {onOpenNotifications && (
+          <button
+            onClick={onOpenNotifications}
+            className="relative p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
+            title="Centre de notifications et alertes"
+          >
+            <Bell className="w-4 h-4" />
+            {unreadNotificationsCount > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-blue-600 text-white text-[10px] font-bold flex items-center justify-center ring-2 ring-slate-900 shadow-sm animate-pulse">
+                {unreadNotificationsCount}
+              </span>
+            )}
+          </button>
+        )}
 
         {/* User profile dropdown */}
         <div className="relative">

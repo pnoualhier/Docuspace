@@ -6,6 +6,8 @@ import {
   INITIAL_DOCUMENTS, 
   INITIAL_AUDIT_LOGS, 
   INITIAL_SHARES,
+  INITIAL_NOTIFICATIONS,
+  INITIAL_INVOICES,
   PLANS 
 } from './services/mockData';
 import { 
@@ -16,7 +18,10 @@ import {
   DocumentVersion, 
   PlanType, 
   AuditLogItem,
-  Share
+  Share,
+  NotificationItem,
+  InvoiceItem,
+  Plan
 } from './types';
 import { Header } from './components/Header';
 import { Sidebar, NavTab } from './components/Sidebar';
@@ -35,6 +40,8 @@ import { SecuritySimulatorModal } from './components/SecuritySimulatorModal';
 import { TenantMembersModal } from './components/TenantMembersModal';
 import { MoveModal } from './components/MoveModal';
 import { PublicShareModal } from './components/PublicShareModal';
+import { NotificationsModal } from './components/NotificationsModal';
+import { BillingCheckoutModal } from './components/BillingCheckoutModal';
 import { 
   FileText, 
   Folder as FolderIcon, 
@@ -85,6 +92,13 @@ export default function App() {
   }>({ isOpen: false, itemToMove: { type: 'document', item: null } });
   const [shares, setShares] = useState<Share[]>(INITIAL_SHARES);
   const [publicShareSimulator, setPublicShareSimulator] = useState<Share | null>(null);
+  const [notifications, setNotifications] = useState<NotificationItem[]>(INITIAL_NOTIFICATIONS);
+  const [invoices, setInvoices] = useState<InvoiceItem[]>(INITIAL_INVOICES);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+  const [billingModal, setBillingModal] = useState<{
+    isOpen: boolean;
+    targetPlan: Plan | null;
+  }>({ isOpen: false, targetPlan: null });
 
   // Resolved active tenant & plan
   const currentTenant = useMemo(() => {
@@ -653,15 +667,97 @@ export default function App() {
     logAction('TRASH_EMPTY', 'TENANT', currentTenant.name, `Corbeille entièrement vidée (${formatBytes(totalBytesFreed)} libérés)`);
   };
 
-  const handleUpgradePlan = (planId: PlanType) => {
+  const handleOpenUpgradeModal = (planId: PlanType) => {
+    setBillingModal({
+      isOpen: true,
+      targetPlan: PLANS[planId] || PLANS.FREE
+    });
+  };
+
+  const handleConfirmUpgrade = (planId: PlanType, interval: 'monthly' | 'yearly') => {
+    const targetPlan = PLANS[planId];
+    if (!targetPlan) return;
+
+    const willExceed = currentTenant.usedBytes > targetPlan.maxStorageBytes;
+
     setTenants(prev => prev.map(t => {
       if (t.id === currentTenant.id) {
-        return { ...t, planId };
+        return {
+          ...t,
+          planId,
+          subscriptionStatus: 'ACTIVE',
+          isRestrictedReadOnly: willExceed
+        };
       }
       return t;
     }));
-    logAction('PLAN_UPGRADE', 'TENANT', planId, `Mise à niveau vers le forfait ${planId}`);
-    alert(`Votre espace est désormais associé au forfait ${planId} (${formatBytes(PLANS[planId].maxStorageBytes)}) !`);
+
+    // Add invoice if paid
+    if (targetPlan.priceMonthly > 0) {
+      const amount = interval === 'yearly' ? targetPlan.priceMonthly * 10 : targetPlan.priceMonthly;
+      const newInvoice: InvoiceItem = {
+        id: `inv-${crypto.randomUUID()}`,
+        number: `INV-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`,
+        amountEur: Number(amount.toFixed(2)),
+        planName: `DocuSpace ${targetPlan.name}`,
+        interval,
+        status: 'PAID',
+        date: new Date().toISOString()
+      };
+      setInvoices(prev => [newInvoice, ...prev]);
+    }
+
+    // Add in-app notification
+    const newNotif: NotificationItem = {
+      id: `notif-${crypto.randomUUID()}`,
+      tenantId: currentTenant.id,
+      userId: currentUser.id,
+      category: 'BILLING',
+      title: willExceed ? `Forfait ${planId} actif — Espace restreint` : `Forfait ${planId} activé avec succès`,
+      message: willExceed
+        ? `Votre forfait est désormais ${targetPlan.name}. Votre volume actuel dépasse le quota : l'espace est en lecture seule.`
+        : `Félicitations ! Votre quota de stockage passe à ${formatBytes(targetPlan.maxStorageBytes)}.`,
+      level: willExceed ? 'WARNING' : 'SUCCESS',
+      actionUrl: '/storage',
+      isRead: false,
+      createdAt: new Date().toISOString()
+    };
+    setNotifications(prev => [newNotif, ...prev]);
+
+    logAction('PLAN_UPGRADE_STRIPE', 'TENANT', planId, `Abonnement Stripe ${planId} validé (${interval})`);
+  };
+
+  const handleMarkNotificationAsRead = (id: string) => {
+    setNotifications(prev => prev.map(n => n.id === id ? { ...n, isRead: true } : n));
+  };
+
+  const handleMarkAllNotificationsAsRead = () => {
+    setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+  };
+
+  const handleDeleteNotification = (id: string) => {
+    setNotifications(prev => prev.filter(n => n.id !== id));
+  };
+
+  const handleUpdateUserStatus = (userId: string, isActive: boolean) => {
+    setUsers(prev => prev.map(u => u.id === userId ? { ...u, isActive } : u));
+    logAction('USER_STATUS_CHANGE', 'USER', userId, `Statut du compte modifié : ${isActive ? 'Actif' : 'Suspendu'}`);
+  };
+
+  const handleUpdateTenantPlan = (tenantId: string, planId: PlanType) => {
+    const targetPlan = PLANS[planId];
+    setTenants(prev => prev.map(t => {
+      if (t.id === tenantId) {
+        const willExceed = (t.usedBytes || 0) > targetPlan.maxStorageBytes;
+        return {
+          ...t,
+          planId,
+          isRestrictedReadOnly: willExceed
+        };
+      }
+      return t;
+    }));
+    logAction('ADMIN_TENANT_PLAN_OVERRIDE', 'TENANT', tenantId, `Forfait forcé vers ${planId} par l'administrateur`);
   };
 
   const handleRegister = (fullName: string, email: string) => {
@@ -727,6 +823,31 @@ export default function App() {
     setAuditLogs(prev => [log, ...prev]);
   };
 
+  const handleDeleteAccount = () => {
+    const userId = currentUser.id;
+    const userEmail = currentUser.email;
+
+    // Purge user's documents & folders
+    setDocuments(prev => prev.filter(d => d.tenantId !== currentTenant.id && d.createdBy !== userId));
+    setFolders(prev => prev.filter(f => f.tenantId !== currentTenant.id && f.createdBy !== userId));
+    setShares(prev => prev.filter(s => s.createdBy !== userId));
+    setTenants(prev => prev.filter(t => t.ownerId !== userId));
+    setUsers(prev => prev.filter(u => u.id !== userId));
+
+    logAction('GDPR_ACCOUNT_PURGE_SUCCESS', 'AUTH', userEmail, 'Compte et données intégralement purgés (RGPD Art. 17)');
+
+    alert(`Votre compte (${userEmail}) ainsi que tous vos espaces et documents ont été définitivement purgés conformément à l'article 17 du RGPD.`);
+
+    const remainingUsers = users.filter(u => u.id !== userId);
+    if (remainingUsers.length > 0) {
+      setCurrentUser(remainingUsers[0]);
+      const nextTenant = tenants.find(t => t.ownerId === remainingUsers[0].id) || tenants[0];
+      setCurrentTenantId(nextTenant.id);
+    } else {
+      setIsAuthOpen(true);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans select-none antialiased">
       {/* Top Header */}
@@ -749,6 +870,8 @@ export default function App() {
         }}
         onOpenSecuritySimulator={() => setIsSecuritySimulatorOpen(true)}
         onOpenMembers={() => setIsMembersOpen(true)}
+        onOpenNotifications={() => setIsNotificationsOpen(true)}
+        unreadNotificationsCount={notifications.filter(n => !n.isRead).length}
         onLogout={() => setIsAuthOpen(true)}
         allUsers={users}
       />
@@ -842,13 +965,15 @@ export default function App() {
               currentTenant={currentTenant}
               currentPlan={currentPlan}
               documents={tenantDocs}
-              onUpgradePlan={handleUpgradePlan}
+              onUpgradePlan={handleOpenUpgradeModal}
             />
           ) : currentTab === 'admin' && currentUser.isSuperuser ? (
             <AdminConsole
               tenants={tenants}
               users={users}
               auditLogs={auditLogs}
+              onUpdateUserStatus={handleUpdateUserStatus}
+              onUpdateTenantPlan={handleUpdateTenantPlan}
             />
           ) : (
             <FileExplorer
@@ -956,10 +1081,7 @@ export default function App() {
         currentUser={currentUser}
         currentTenant={currentTenant}
         documents={tenantDocs}
-        onDeleteAccount={() => {
-          alert('Votre compte a été purgé conformément au RGPD.');
-          setIsAuthOpen(true);
-        }}
+        onDeleteAccount={handleDeleteAccount}
       />
 
       <AuthModal
@@ -1000,6 +1122,27 @@ export default function App() {
         share={publicShareSimulator}
         document={documents.find(d => d.id === publicShareSimulator?.documentId) || null}
         onDownloadIncrement={handleDownloadIncrement}
+      />
+
+      <NotificationsModal
+        isOpen={isNotificationsOpen}
+        onClose={() => setIsNotificationsOpen(false)}
+        notifications={notifications}
+        onMarkAsRead={handleMarkNotificationAsRead}
+        onMarkAllAsRead={handleMarkAllNotificationsAsRead}
+        onDeleteNotification={handleDeleteNotification}
+        onNavigateAction={(url) => {
+          if (url === '/storage') setCurrentTab('storage');
+        }}
+      />
+
+      <BillingCheckoutModal
+        isOpen={billingModal.isOpen}
+        onClose={() => setBillingModal({ isOpen: false, targetPlan: null })}
+        targetPlan={billingModal.targetPlan}
+        currentTenant={currentTenant}
+        invoices={invoices}
+        onConfirmUpgrade={handleConfirmUpgrade}
       />
     </div>
   );

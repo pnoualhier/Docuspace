@@ -34,6 +34,8 @@ export interface Tenant {
   usedBytes: number;
   reservedBytes: number;
   documentCount: number;
+  subscriptionStatus?: 'ACTIVE' | 'PAST_DUE' | 'CANCELED' | 'TRIALING';
+  isRestrictedReadOnly?: boolean;
 }
 
 export interface Folder {
@@ -129,4 +131,31 @@ export interface SessionInfo {
   ipAddress: string;
   lastActive: string;
   isCurrent: boolean;
+}
+
+export type NotificationCategory = 'STORAGE' | 'SECURITY' | 'BILLING' | 'SHARING';
+export type NotificationLevel = 'INFO' | 'WARNING' | 'CRITICAL' | 'SUCCESS';
+
+export interface NotificationItem {
+  id: string;
+  tenantId: string;
+  userId: string;
+  category: NotificationCategory;
+  title: string;
+  message: string;
+  level: NotificationLevel;
+  actionUrl?: string;
+  isRead: boolean;
+  createdAt: string;
+}
+
+export interface InvoiceItem {
+  id: string;
+  number: string;
+  amountEur: number;
+  planName: string;
+  interval: 'monthly' | 'yearly';
+  status: 'PAID' | 'PAST_DUE' | 'OPEN';
+  date: string;
+  pdfUrl?: string;
 }
