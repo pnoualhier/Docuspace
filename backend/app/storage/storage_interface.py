@@ -75,6 +75,11 @@ class StorageBackend(abc.ABC):
         """Check if an object exists in the storage bucket."""
         pass
 
+    @abc.abstractmethod
+    def list_objects(self, prefix: str = "") -> list:
+        """List objects matching prefix in the bucket."""
+        pass
+
     @staticmethod
     def compute_sha256(data: bytes) -> str:
         """Compute the SHA-256 hexadecimal hash of bytes payload."""

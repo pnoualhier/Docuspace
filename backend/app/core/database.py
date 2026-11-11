@@ -34,16 +34,18 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 async def set_tenant_context(session: AsyncSession, tenant_id: str, is_superuser: bool = False):
     """
     Sets the transaction-scoped PostgreSQL session variables for Row-Level Security (RLS).
+    Uses safe set_config(name, value, is_local) compatible with parameterized queries.
     Prevents any cross-tenant data leakage at database engine level.
     """
     await session.execute(
-        text("SET LOCAL app.current_tenant_id = :tenant_id"),
+        text("SELECT set_config('app.current_tenant_id', :tenant_id, true)"),
         {"tenant_id": str(tenant_id)}
     )
-    if is_superuser:
-        await session.execute(text("SET LOCAL app.is_superuser = 'true'"))
-    else:
-        await session.execute(text("SET LOCAL app.is_superuser = 'false'"))
+    val = "true" if is_superuser else "false"
+    await session.execute(
+        text("SELECT set_config('app.is_superuser', :val, true)"),
+        {"val": val}
+    )
 
 async def reset_tenant_context(session: AsyncSession):
     """
@@ -51,8 +53,8 @@ async def reset_tenant_context(session: AsyncSession):
     to prevent connection-pool leakage across subsequent requests.
     """
     try:
-        await session.execute(text("RESET app.current_tenant_id"))
-        await session.execute(text("RESET app.is_superuser"))
+        await session.execute(text("SELECT set_config('app.current_tenant_id', '', true)"))
+        await session.execute(text("SELECT set_config('app.is_superuser', 'false', true)"))
     except Exception:
         pass
 

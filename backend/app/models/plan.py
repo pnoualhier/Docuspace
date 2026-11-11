@@ -6,7 +6,7 @@ from backend.app.core.database import Base
 class Plan(Base):
     __tablename__ = "plans"
 
-    id = Column(String(32), PRIMARY KEY=True) # FREE, PERSONAL, PREMIUM
+    id = Column(String(32), primary_key=True) # FREE, PERSONAL, PREMIUM
     name = Column(String(64), nullable=False)
     max_storage_bytes = Column(BigInteger, nullable=False)
     max_file_size_bytes = Column(BigInteger, nullable=False)

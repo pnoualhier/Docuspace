@@ -2,7 +2,7 @@ import uuid
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Request
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_
 
 from backend.app.core.database import get_db
@@ -39,8 +39,8 @@ router = APIRouter(tags=["Partage Sécurisé & Liens"])
 # In-memory share store fallback for unit tests and direct validation
 _LOCAL_SHARES: Dict[str, Dict[str, Any]] = {}
 
-def _log_share_audit(
-    db: Session,
+async def _log_share_audit(
+    db: AsyncSession,
     tenant_id: uuid.UUID,
     user_id: Optional[uuid.UUID],
     user_email: str,
@@ -65,15 +65,15 @@ def _log_share_audit(
             details={"info": details}
         )
         db.add(log)
-        db.commit()
+        await db.commit()
     except Exception:
-        db.rollback()
+        await db.rollback()
 
 @router.post("/internal", response_model=ShareRead, status_code=status.HTTP_201_CREATED)
-def create_internal_share(
+async def create_internal_share(
     req: InternalShareCreate,
     context: TenantContext = Depends(require_permission(Permission.DOCUMENT_SHARE)),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Partage un document ou un dossier avec un utilisateur identifié via son e-mail.
@@ -86,32 +86,35 @@ def create_internal_share(
 
     target_name = "Ressource"
     if req.document_id:
-        doc = db.execute(
+        doc_res = await db.execute(
             select(Document).where(
                 Document.id == req.document_id,
                 Document.tenant_id == context.tenant_id,
                 Document.is_trashed == False
             )
-        ).scalar_one_or_none()
+        )
+        doc = doc_res.scalar_one_or_none()
         if not doc:
             raise HTTPException(status_code=404, detail="Document introuvable dans cet espace.")
         target_name = doc.original_name
     elif req.folder_id:
-        folder = db.execute(
+        folder_res = await db.execute(
             select(Folder).where(
                 Folder.id == req.folder_id,
                 Folder.tenant_id == context.tenant_id,
                 Folder.is_trashed == False
             )
-        ).scalar_one_or_none()
+        )
+        folder = folder_res.scalar_one_or_none()
         if not folder:
             raise HTTPException(status_code=404, detail="Dossier introuvable dans cet espace.")
         target_name = folder.name
 
     # Check recipient user
-    recipient_user = db.execute(
+    recip_res = await db.execute(
         select(User).where(User.email == req.recipient_email.lower())
-    ).scalar_one_or_none()
+    )
+    recipient_user = recip_res.scalar_one_or_none()
 
     share_id = uuid.uuid4()
     recipient_id = uuid.uuid4()
@@ -142,9 +145,9 @@ def create_internal_share(
     try:
         db.add(new_share)
         db.add(recipient)
-        db.commit()
+        await db.commit()
     except Exception:
-        db.rollback()
+        await db.rollback()
 
     # Track in local memory
     _LOCAL_SHARES[str(share_id)] = {
@@ -169,7 +172,7 @@ def create_internal_share(
         "updated_at": now
     }
 
-    _log_share_audit(
+    await _log_share_audit(
         db, context.tenant_id, context.user_id, context.user.email,
         "SHARE_INTERNAL_CREATE", "DOCUMENT" if req.document_id else "FOLDER",
         target_name, "127.0.0.1", f"Partagé avec {req.recipient_email} (rôle: {req.role})"
@@ -199,10 +202,10 @@ def create_internal_share(
     )
 
 @router.post("/link", response_model=ShareRead, status_code=status.HTTP_201_CREATED)
-def create_secure_link(
+async def create_secure_link(
     req: SecureLinkCreate,
     context: TenantContext = Depends(require_permission(Permission.DOCUMENT_SHARE)),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Génère un lien de partage public sécurisé :
@@ -217,25 +220,27 @@ def create_secure_link(
     target_name = "Ressource"
     doc_meta = None
     if req.document_id:
-        doc = db.execute(
+        doc_res = await db.execute(
             select(Document).where(
                 Document.id == req.document_id,
                 Document.tenant_id == context.tenant_id,
                 Document.is_trashed == False
             )
-        ).scalar_one_or_none()
+        )
+        doc = doc_res.scalar_one_or_none()
         if not doc:
             raise HTTPException(status_code=404, detail="Document introuvable.")
         target_name = doc.original_name
         doc_meta = doc
     elif req.folder_id:
-        folder = db.execute(
+        folder_res = await db.execute(
             select(Folder).where(
                 Folder.id == req.folder_id,
                 Folder.tenant_id == context.tenant_id,
                 Folder.is_trashed == False
             )
-        ).scalar_one_or_none()
+        )
+        folder = folder_res.scalar_one_or_none()
         if not folder:
             raise HTTPException(status_code=404, detail="Dossier introuvable.")
         target_name = folder.name
@@ -270,9 +275,9 @@ def create_secure_link(
 
     try:
         db.add(new_share)
-        db.commit()
+        await db.commit()
     except Exception:
-        db.rollback()
+        await db.rollback()
 
     public_url = f"{settings.APP_URL}/s/{token}"
 
@@ -300,7 +305,7 @@ def create_secure_link(
     }
     _LOCAL_SHARES[str(share_id)] = _LOCAL_SHARES[token]
 
-    _log_share_audit(
+    await _log_share_audit(
         db, context.tenant_id, context.user_id, context.user.email,
         "SHARE_LINK_CREATE", "DOCUMENT" if req.document_id else "FOLDER",
         target_name, "127.0.0.1", f"Lien généré (Mot de passe: {bool(pwd_hash)}, Expire: {expires_at})"
@@ -328,27 +333,28 @@ def create_secure_link(
     )
 
 @router.delete("/{share_id}", status_code=status.HTTP_204_NO_CONTENT)
-def revoke_share(
+async def revoke_share(
     share_id: uuid.UUID,
     context: TenantContext = Depends(require_permission(Permission.DOCUMENT_SHARE)),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Révoque et désactive immédiatement un lien de partage ou une invitation.
     """
-    share = db.execute(
+    share_res = await db.execute(
         select(Share).where(
             Share.id == share_id,
             Share.tenant_id == context.tenant_id
         )
-    ).scalar_one_or_none()
+    )
+    share = share_res.scalar_one_or_none()
 
     if share:
         share.is_active = False
         try:
-            db.commit()
+            await db.commit()
         except Exception:
-            db.rollback()
+            await db.rollback()
 
     if str(share_id) in _LOCAL_SHARES:
         _LOCAL_SHARES[str(share_id)]["is_active"] = False
@@ -356,7 +362,7 @@ def revoke_share(
         if tok and tok in _LOCAL_SHARES:
             _LOCAL_SHARES[tok]["is_active"] = False
 
-    _log_share_audit(
+    await _log_share_audit(
         db, context.tenant_id, context.user_id, context.user.email,
         "SHARE_REVOKE", "SHARE", str(share_id), "127.0.0.1", "Partage révoqué avec succès"
     )
@@ -364,10 +370,10 @@ def revoke_share(
 # --- PUBLIC ACCESS ENDPOINTS (Unauthenticated / Token-Protected) ---
 
 @router.get("/public/{token}", response_model=PublicShareDetails)
-def get_public_share_info(
+async def get_public_share_info(
     token: str,
     request: Request,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Consulte les informations d'un lien public :
@@ -380,7 +386,8 @@ def get_public_share_info(
     if token in _LOCAL_SHARES:
         share = _LOCAL_SHARES[token]
     else:
-        db_share = db.execute(select(Share).where(Share.token_hash == token)).scalar_one_or_none()
+        db_share_res = await db.execute(select(Share).where(Share.token_hash == token))
+        db_share = db_share_res.scalar_one_or_none()
         if db_share:
             share = {
                 "id": db_share.id,
@@ -420,7 +427,7 @@ def get_public_share_info(
 
     is_pwd_required = share.get("has_password", False)
 
-    _log_share_audit(
+    await _log_share_audit(
         db, share["tenant_id"], None, "public_visitor",
         "PUBLIC_SHARE_VIEW", "DOCUMENT" if share.get("document_id") else "FOLDER",
         share.get("target_name", "Public"), request.client.host if request.client else "127.0.0.1",
@@ -447,11 +454,11 @@ def get_public_share_info(
     )
 
 @router.post("/public/{token}/access", response_model=PublicShareDetails)
-def access_public_share(
+async def access_public_share(
     token: str,
     req: PublicShareAccessRequest,
     request: Request,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Déverrouille l'accès avec vérification du mot de passe et protection anti brute-force.
@@ -466,6 +473,25 @@ def access_public_share(
         )
 
     share = _LOCAL_SHARES.get(token)
+    if not share:
+        db_s_res = await db.execute(select(Share).where(Share.token_hash == token))
+        db_s = db_s_res.scalar_one_or_none()
+        if db_s:
+            share = {
+                "id": db_s.id,
+                "tenant_id": db_s.tenant_id,
+                "document_id": db_s.document_id,
+                "folder_id": db_s.folder_id,
+                "target_name": "Document Partagé",
+                "is_active": db_s.is_active,
+                "has_password": bool(db_s.password_hash),
+                "password_hash": db_s.password_hash,
+                "expires_at": db_s.expires_at,
+                "download_count": db_s.download_count,
+                "max_downloads": db_s.max_downloads,
+            }
+            _LOCAL_SHARES[token] = share
+
     if not share or not share.get("is_active"):
         raise HTTPException(status_code=404, detail="Lien introuvable ou révoqué.")
 
@@ -486,14 +512,14 @@ def access_public_share(
         share_rate_limiter.reset_attempts(rate_limit_id)
 
     # Return access details
-    return get_public_share_info(token, request, db)
+    return await get_public_share_info(token, request, db)
 
 @router.post("/public/{token}/download", response_model=PublicShareDownloadResponse)
-def download_public_share(
+async def download_public_share(
     token: str,
     req: PublicShareAccessRequest,
     request: Request,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Télécharge le document partagé :
@@ -511,6 +537,25 @@ def download_public_share(
         )
 
     share = _LOCAL_SHARES.get(token)
+    if not share:
+        db_s_res = await db.execute(select(Share).where(Share.token_hash == token))
+        db_s = db_s_res.scalar_one_or_none()
+        if db_s:
+            share = {
+                "id": db_s.id,
+                "tenant_id": db_s.tenant_id,
+                "document_id": db_s.document_id,
+                "folder_id": db_s.folder_id,
+                "target_name": "Document Partagé",
+                "is_active": db_s.is_active,
+                "has_password": bool(db_s.password_hash),
+                "password_hash": db_s.password_hash,
+                "expires_at": db_s.expires_at,
+                "download_count": db_s.download_count,
+                "max_downloads": db_s.max_downloads,
+            }
+            _LOCAL_SHARES[token] = share
+
     if not share or not share.get("is_active"):
         raise HTTPException(status_code=404, detail="Lien introuvable ou révoqué.")
 
@@ -536,6 +581,16 @@ def download_public_share(
     # Increment download count
     share["download_count"] = share.get("download_count", 0) + 1
 
+    # Update in DB as source of truth
+    db_s_res = await db.execute(select(Share).where(Share.token_hash == token))
+    db_s = db_s_res.scalar_one_or_none()
+    if db_s:
+        db_s.download_count = (db_s.download_count or 0) + 1
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+
     doc_meta = share.get("doc_meta")
     filename = share.get("target_name", "document.pdf")
     storage_key = doc_meta.storage_key if doc_meta else f"tenants/{share['tenant_id']}/doc-public.pdf"
@@ -547,7 +602,7 @@ def download_public_share(
         expires_in=600
     )
 
-    _log_share_audit(
+    await _log_share_audit(
         db, share["tenant_id"], None, "public_downloader",
         "PUBLIC_SHARE_DOWNLOAD", "DOCUMENT",
         filename, client_ip, f"Téléchargement n°{share['download_count']} / {max_dl or 'illimité'}"

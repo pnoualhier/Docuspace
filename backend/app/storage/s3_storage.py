@@ -137,5 +137,13 @@ class S3Storage(StorageBackend):
         """Returns True if object exists."""
         return storage_key in self._local_storage
 
+    def list_objects(self, prefix: str = "") -> list:
+        """List objects matching prefix in the bucket."""
+        results = []
+        for key, data in self._local_storage.items():
+            if key.startswith(prefix):
+                results.append({"key": key, "size": len(data)})
+        return results
+
 # Global singleton storage client instance
 storage_client = S3Storage()

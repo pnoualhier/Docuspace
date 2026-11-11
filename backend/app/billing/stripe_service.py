@@ -15,11 +15,11 @@ PLAN_CATALOG = {
         "name": "DocuSpace Gratuit",
         "price_monthly": 0.00,
         "price_yearly": 0.00,
-        "max_storage_bytes": 1073741824,         # 1 Go
-        "max_file_size_bytes": 52428800,         # 50 Mo
+        "max_storage_bytes": 524288000,          # 500 Mo
+        "max_file_size_bytes": 104857600,        # 100 Mo
         "max_members": 1,
         "max_versions_per_file": 3,
-        "features": ["1 Go stockage", "ClamAV Antivirus", "3 versions", "Partage sécurisé"]
+        "features": ["500 Mo stockage", "ClamAV Antivirus", "3 versions", "Partage sécurisé"]
     },
     "PERSONAL": {
         "id": "PERSONAL",
@@ -27,7 +27,7 @@ PLAN_CATALOG = {
         "price_monthly": 4.99,
         "price_yearly": 49.90,
         "max_storage_bytes": 21474836480,        # 20 Go
-        "max_file_size_bytes": 536870912,        # 500 Mo
+        "max_file_size_bytes": 2147483648,       # 2 Go
         "max_members": 3,
         "max_versions_per_file": 10,
         "features": ["20 Go stockage", "ClamAV Antivirus", "10 versions", "Multi-comptes 3 membres", "Support prioritaire"]
@@ -37,11 +37,11 @@ PLAN_CATALOG = {
         "name": "DocuSpace Famille / Pro",
         "price_monthly": 14.99,
         "price_yearly": 149.90,
-        "max_storage_bytes": 214748364800,      # 200 Go
-        "max_file_size_bytes": 2147483648,       # 2 Go
+        "max_storage_bytes": 107374182400,       # 100 Go
+        "max_file_size_bytes": 5368709120,       # 5 Go
         "max_members": 10,
         "max_versions_per_file": 100,
-        "features": ["200 Go stockage", "ClamAV Antivirus", "Versions illimitées", "10 membres", "Support dédié 24/7"]
+        "features": ["100 Go stockage", "ClamAV Antivirus", "Versions illimitées", "10 membres", "Support dédié 24/7"]
     }
 }
 

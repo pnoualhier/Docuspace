@@ -62,6 +62,14 @@ class TenantContext:
         self.role = role
         self.db = db
 
+    @property
+    def tenant_id(self) -> UUID:
+        return self.tenant.id
+
+    @property
+    def user_id(self) -> UUID:
+        return self.user.id
+
     def has_permission(self, permission: Permission) -> bool:
         if self.user.is_superuser:
             return True
@@ -173,3 +181,6 @@ def require_permission(required_perm: Permission):
             )
         return ctx
     return permission_checker
+
+# Alias for backward compatibility across route handlers
+get_tenant_context = get_current_tenant_context

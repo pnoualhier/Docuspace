@@ -157,13 +157,36 @@ def test_s3_presigned_urls_and_hmac():
 def test_clamav_antivirus_fail_closed():
     """Test ClamAV scanner with clean file, EICAR virus, and binary headers."""
     print("  [>] Testing ClamAV Antivirus Scanner (Fail-Closed & Heuristics)...")
-    scanner = ClamAVScanner(fail_closed=True)
+    # 1. Clean file test with responsive ClamAV daemon
+    class MockClamavSocket:
+        def __init__(self, response=b"stream: OK\0"):
+            self.response = response
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def settimeout(self, t):
+            pass
+        def connect(self, addr):
+            pass
+        def sendall(self, d):
+            pass
+        def recv(self, n):
+            r = self.response
+            self.response = b""
+            return r
 
-    # 1. Clean file test
+    online_scanner = ClamAVScanner(socket_factory=lambda *a, **kw: MockClamavSocket(b"stream: OK\0"))
     clean_content = b"%PDF-1.7\n1 0 obj\n<< /Title (DocuSpace Secure PDF) >>\nendobj\ntrailer\n%%EOF"
-    res_clean = scanner.scan_bytes(clean_content)
-    assert res_clean.is_clean, "Clean PDF should be marked clean"
+    res_clean = online_scanner.scan_bytes(clean_content)
+    assert res_clean.is_clean, "Clean PDF should be marked clean when ClamAV daemon is active"
     assert res_clean.status == "CLEAN"
+
+    # 1b. Fail-Closed verification: Unreachable ClamAV must produce SCAN_ERROR, never CLEAN
+    scanner = ClamAVScanner(fail_closed=True)
+    res_offline = scanner.scan_bytes(clean_content)
+    assert not res_offline.is_clean, "Unchecked file with offline ClamAV must NOT be marked clean (Fail-Closed)!"
+    assert res_offline.status == "SCAN_ERROR"
 
     # 2. EICAR Standard Antivirus Test signature
     infected_content = b"Prefix text " + EICAR_SIGNATURE + b" Suffix text"
