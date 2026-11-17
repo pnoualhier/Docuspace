@@ -272,8 +272,9 @@ async def direct_upload(
     try:
         db.add(new_doc)
         db.add(initial_version)
-        await db.commit()
+        await db.flush()
         await db.refresh(new_doc)
+        await db.commit()
     except Exception:
         # Atomic rollback and object removal
         storage_client.delete_object(storage_key)
@@ -428,8 +429,9 @@ async def complete_upload(
     try:
         db.add(new_doc)
         db.add(initial_version)
-        await db.commit()
+        await db.flush()
         await db.refresh(new_doc)
+        await db.commit()
     except Exception:
         await db.rollback()
         raise HTTPException(

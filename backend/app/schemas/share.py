@@ -32,6 +32,7 @@ class ShareRead(BaseModel):
     tenant_id: UUID
     document_id: Optional[UUID] = None
     folder_id: Optional[UUID] = None
+    created_by: Optional[UUID] = None
     target_name: str
     share_type: str # 'INTERNAL_USER' or 'SECURE_LINK'
     role: str

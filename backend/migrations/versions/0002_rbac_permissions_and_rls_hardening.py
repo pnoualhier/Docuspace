@@ -32,7 +32,17 @@ def upgrade() -> None:
         sa.Column('permission_code', sa.String(length=64), sa.ForeignKey('permissions.code', ondelete='CASCADE'), primary_key=True)
     )
 
-    # 3. Seed granular permissions
+    # 3. Seed canonical roles (required by role_permissions FK)
+    op.execute("""
+        INSERT INTO roles (name, description) VALUES
+            ('OWNER', 'Propriétaire complet de l''espace documentaire'),
+            ('EDITOR', 'Éditeur avec droits de modification et d''import'),
+            ('VIEWER', 'Lecteur seul sans droit de modification'),
+            ('GUEST', 'Invité avec accès restreint à des fichiers ciblés')
+        ON CONFLICT (name) DO NOTHING
+    """)
+
+    # 4. Seed granular permissions
     op.execute("""
         INSERT INTO permissions (code, name, description) VALUES
             ('document:read', 'Lecture de documents', 'Permet de consulter et télécharger des fichiers'),
@@ -46,34 +56,33 @@ def upgrade() -> None:
             ('member:manage', 'Gestion des membres', 'Permet de modifier les rôles ou retirer des membres'),
             ('tenant:settings', 'Paramètres de l''espace', 'Permet de modifier les options et le forfait du tenant'),
             ('audit:read', 'Consultation d''audit', 'Permet de lire les journaux de sécurité')
-        ON CONFLICT (code) DO NOTHING;
+        ON CONFLICT (code) DO NOTHING
     """)
 
-    # 4. Associate permissions to roles
+    # 5. Associate permissions to roles (separate statements for asyncpg)
     op.execute("""
-        -- OWNER has all permissions
         INSERT INTO role_permissions (role_name, permission_code)
         SELECT 'OWNER', code FROM permissions
-        ON CONFLICT DO NOTHING;
-
-        -- EDITOR permissions
+        ON CONFLICT DO NOTHING
+    """)
+    op.execute("""
         INSERT INTO role_permissions (role_name, permission_code) VALUES
             ('EDITOR', 'document:read'),
             ('EDITOR', 'document:write'),
             ('EDITOR', 'document:share'),
             ('EDITOR', 'folder:create'),
             ('EDITOR', 'folder:manage')
-        ON CONFLICT DO NOTHING;
-
-        -- VIEWER permissions
+        ON CONFLICT DO NOTHING
+    """)
+    op.execute("""
         INSERT INTO role_permissions (role_name, permission_code) VALUES
             ('VIEWER', 'document:read')
-        ON CONFLICT DO NOTHING;
-
-        -- GUEST permissions
+        ON CONFLICT DO NOTHING
+    """)
+    op.execute("""
         INSERT INTO role_permissions (role_name, permission_code) VALUES
             ('GUEST', 'document:read')
-        ON CONFLICT DO NOTHING;
+        ON CONFLICT DO NOTHING
     """)
 
 

@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Any
 from passlib.context import CryptContext
@@ -30,6 +31,7 @@ def create_access_token(subject: str | Any, tenant_id: Optional[str] = None, exp
         "sub": str(subject),
         "exp": expire,
         "iat": datetime.now(timezone.utc),
+        "jti": str(uuid.uuid4()),
         "type": "access",
     }
     if tenant_id:
@@ -48,6 +50,7 @@ def create_refresh_token(subject: str | Any, expires_delta: Optional[timedelta] 
         "sub": str(subject),
         "exp": expire,
         "iat": datetime.now(timezone.utc),
+        "jti": str(uuid.uuid4()),
         "type": "refresh",
     }
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)

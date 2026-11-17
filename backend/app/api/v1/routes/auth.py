@@ -9,7 +9,7 @@ from sqlalchemy import select, update
 from jose import JWTError
 
 from backend.app.core.config import settings
-from backend.app.core.database import get_db
+from backend.app.core.database import get_db, set_tenant_context
 from backend.app.core.security import (
     verify_password,
     get_password_hash,
@@ -92,6 +92,8 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
     db.add(personal_tenant)
     await db.flush()
 
+    await set_tenant_context(db, str(personal_tenant.id))
+
     # 3. Associate as OWNER
     membership = TenantMember(
         tenant_id=personal_tenant.id,
@@ -109,8 +111,9 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
     )
     db.add(storage)
 
-    await db.commit()
+    await db.flush()
     await db.refresh(new_user)
+    await db.commit()
     return new_user
 
 @router.get("/verify-email", tags=["Authentification"])

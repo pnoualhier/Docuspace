@@ -5,7 +5,7 @@ Ce guide détaille la mise en service complète de **DocuSpace** sur un serveur 
 ## 1. Prérequis Système
 
 - Système d'exploitation : **Debian 12 (Bookworm)**
-- Processeur : 2 vCPU minimum (4 recommandés pour ClamAV et conversions LibreOffice)
+- Processeur : 2 vCPU minimum (4 recommandés pour ClamAV)
 - Mémoire RAM : 4 Go minimum (8 Go recommandés)
 - Espace Disque : 50 Go SSD ou plus
 
@@ -18,7 +18,7 @@ Exécutez les commandes suivantes avec les droits `sudo` :
 ```bash
 # 1. Mise à jour des paquets et dépendances
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y curl gnupg ca-certificates lsb-release
+sudo apt install -y curl gnupg ca-certificates lsb-release python3
 
 # 2. Ajout de la clé GPG officielle Docker
 sudo install -m 0755 -d /etc/apt/keyrings
@@ -47,9 +47,10 @@ sudo systemctl enable --now docker
 sudo mkdir -p /opt/docuspace
 cd /opt/docuspace
 
-# 2. Préparer automatiquement les variables d'environnement
-# Un script autonome génère toutes les clés cryptographiques et les configure :
-./scripts/init/generate_env.sh docker.env
+# 2. Générer le fichier .env sécurisé à la racine (permissions 600)
+# Optionnel : passer le chemin cible et votre URL de domaine en arguments
+chmod +x scripts/init/generate_env.sh
+./scripts/init/generate_env.sh .env https://votre-domaine.fr
 
 # 3. Lancer les conteneurs avec Docker Compose
 docker compose up -d --build
@@ -63,8 +64,9 @@ docker compose ps
 ## 4. Initialisation de la Base de Données & Migrations
 
 ```bash
-# Exécution automatique des migrations Alembic
+# Exécution des migrations Alembic (schéma complet, RLS et plans)
 docker compose exec backend alembic upgrade head
 ```
 
-L'application est immédiatement accessible sur `http://<IP_DU_SERVEUR>` ou via votre nom de domaine configuré sur Nginx.
+L'application est immédiatement accessible via Nginx sur `http://<IP_DU_SERVEUR>` ou via votre nom de domaine HTTPS configuré.
+Aucun port interne (PostgreSQL 5432, Redis 6379, MinIO 9000/9001, ClamAV 3310, Backend 8000, Frontend 3000) n'est exposé publiquement.

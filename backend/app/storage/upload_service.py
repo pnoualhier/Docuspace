@@ -206,8 +206,9 @@ async def create_persisted_upload_session(
         created_at=now
     )
     db.add(session)
-    await db.commit()
+    await db.flush()
     await db.refresh(session)
+    await db.commit()
     return session
 
 async def get_valid_persisted_upload_session(

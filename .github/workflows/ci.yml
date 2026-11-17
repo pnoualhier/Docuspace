@@ -1,0 +1,107 @@
+name: DocuSpace CI — Integration & Security Suite
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  backend-real-services:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: docuspace_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_postgres_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d docuspace_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      minio:
+        image: minio/minio:RELEASE.2024-05-10T01-41-38Z
+        command: server /data
+        env:
+          MINIO_ROOT_USER: ci_minio_admin
+          MINIO_ROOT_PASSWORD: ci_minio_secret_password
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -fsS http://127.0.0.1:9000/minio/health/live"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      clamav:
+        image: clamav/clamav:latest
+        ports:
+          - 3310:3310
+        options: >-
+          --health-cmd "clamdscan --ping 10"
+          --health-interval 20s
+          --health-timeout 10s
+          --health-start-period 120s
+          --health-retries 6
+
+      redis:
+        image: redis:7-alpine
+        command: redis-server --requirepass ci_redis_password
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "REDISCLI_AUTH=ci_redis_password redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system and Python dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y libmagic1 libpq-dev postgresql-client
+          pip install -r backend/requirements.txt
+
+      - name: Run full pytest suite against real PostgreSQL, MinIO, ClamAV & Redis
+        env:
+          APP_ENV: test
+          SECRET_KEY: ci_ephemeral_jwt_signing_key_32_characters_long
+          TEST_DATABASE_URL: postgresql+asyncpg://postgres:ci_postgres_password@127.0.0.1:5432/docuspace_ci
+          DATABASE_URL: postgresql+asyncpg://postgres:ci_postgres_password@127.0.0.1:5432/docuspace_ci
+          TEST_MINIO_ENDPOINT: 127.0.0.1:9000
+          MINIO_ENDPOINT: 127.0.0.1:9000
+          MINIO_ACCESS_KEY: ci_minio_admin
+          MINIO_SECRET_KEY: ci_minio_secret_password
+          TEST_CLAMAV_HOST: 127.0.0.1
+          TEST_CLAMAV_PORT: 3310
+          REDIS_URL: redis://:ci_redis_password@127.0.0.1:6379/0
+        run: |
+          python3 -m pytest backend/tests/ -v
+
+  frontend-tests-and-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install, lint, test, and build frontend
+        run: |
+          npm install --no-audit --no-fund
+          npm run lint
+          npm test
+          npm run build

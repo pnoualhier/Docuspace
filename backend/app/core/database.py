@@ -47,6 +47,24 @@ async def set_tenant_context(session: AsyncSession, tenant_id: str, is_superuser
         {"val": val}
     )
 
+async def set_public_share_context(session: AsyncSession, token_hash: str):
+    """Sets transaction-local token hash for RLS access on a single SECURE_LINK share."""
+    await session.execute(
+        text("SELECT set_config('app.public_share_token_hash', :token_hash, true)"),
+        {"token_hash": token_hash}
+    )
+
+async def set_user_recipient_context(session: AsyncSession, user_id: str, user_email: str):
+    """Sets transaction-local recipient identity for RLS access on received internal shares."""
+    await session.execute(
+        text("SELECT set_config('app.current_user_id', :user_id, true)"),
+        {"user_id": str(user_id)}
+    )
+    await session.execute(
+        text("SELECT set_config('app.current_user_email', :user_email, true)"),
+        {"user_email": user_email.lower()}
+    )
+
 async def reset_tenant_context(session: AsyncSession):
     """
     Explicitly resets the tenant RLS context between transactions/connections
@@ -55,6 +73,9 @@ async def reset_tenant_context(session: AsyncSession):
     try:
         await session.execute(text("SELECT set_config('app.current_tenant_id', '', true)"))
         await session.execute(text("SELECT set_config('app.is_superuser', 'false', true)"))
+        await session.execute(text("SELECT set_config('app.public_share_token_hash', '', true)"))
+        await session.execute(text("SELECT set_config('app.current_user_id', '', true)"))
+        await session.execute(text("SELECT set_config('app.current_user_email', '', true)"))
     except Exception:
         pass
 

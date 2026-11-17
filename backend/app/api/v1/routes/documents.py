@@ -131,8 +131,9 @@ async def create_folder(
         created_by=ctx.user.id
     )
     ctx.db.add(folder)
-    await ctx.db.commit()
+    await ctx.db.flush()
     await ctx.db.refresh(folder)
+    await ctx.db.commit()
     return folder
 
 @router.patch("/folders/{folder_id}", response_model=FolderRead, tags=["Dossiers & Documents"])
@@ -156,8 +157,9 @@ async def update_folder(
     if payload.is_favorite is not None:
         folder.is_favorite = payload.is_favorite
 
-    await ctx.db.commit()
+    await ctx.db.flush()
     await ctx.db.refresh(folder)
+    await ctx.db.commit()
     return folder
 
 @router.patch("/folders/{folder_id}/move", response_model=FolderRead, tags=["Dossiers & Documents"])
@@ -204,8 +206,9 @@ async def move_folder(
             curr = parent_check.scalar_one_or_none()
 
     folder.parent_id = new_parent_id
-    await ctx.db.commit()
+    await ctx.db.flush()
     await ctx.db.refresh(folder)
+    await ctx.db.commit()
     return folder
 
 @router.post("/folders/{folder_id}/copy", response_model=FolderRead, tags=["Dossiers & Documents"])
@@ -233,8 +236,9 @@ async def copy_folder(
         created_by=ctx.user.id
     )
     ctx.db.add(copied_folder)
-    await ctx.db.commit()
+    await ctx.db.flush()
     await ctx.db.refresh(copied_folder)
+    await ctx.db.commit()
     return copied_folder
 
 @router.delete("/folders/{folder_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Dossiers & Documents"])
@@ -376,8 +380,9 @@ async def update_document(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier cible introuvable")
         doc.folder_id = payload.folder_id
 
-    await ctx.db.commit()
+    await ctx.db.flush()
     await ctx.db.refresh(doc)
+    await ctx.db.commit()
     return doc
 
 @router.post("/documents/{document_id}/copy", response_model=DocumentRead, tags=["Dossiers & Documents"])
@@ -429,8 +434,9 @@ async def copy_document(
         )
     )
 
-    await ctx.db.commit()
+    await ctx.db.flush()
     await ctx.db.refresh(copied_doc)
+    await ctx.db.commit()
     return copied_doc
 
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Dossiers & Documents"])
@@ -674,8 +680,9 @@ async def create_document_version(
     doc.updated_at = datetime.now(timezone.utc)
 
     ctx.db.add(new_version)
-    await ctx.db.commit()
+    await ctx.db.flush()
     await ctx.db.refresh(new_version)
+    await ctx.db.commit()
     return new_version
 
 @router.post("/documents/{id}/versions/{version_id}/restore", response_model=VersionRestoreResponse, tags=["Versions & Révisions"])

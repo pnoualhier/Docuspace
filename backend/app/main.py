@@ -1,10 +1,19 @@
+from contextlib import asynccontextmanager
 import time
 import uuid
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from backend.app.core.config import settings
+from backend.app.core.config import settings, is_test_runtime
 from backend.app.api.v1.routes import auth, health, tenants, documents, storage, shares, billing, notifications, admin, gdpr
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if settings.APP_ENV == "production" and not is_test_runtime():
+        settings.validate_production_secrets()
+    yield
+
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -13,6 +22,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
+    lifespan=lifespan,
 )
 
 # CORS setup

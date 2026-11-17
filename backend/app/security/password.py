@@ -76,6 +76,13 @@ def generate_share_token(length: int = 32) -> str:
     """Generates a high-entropy URL-safe share token."""
     return secrets.token_urlsafe(length)
 
+def hash_share_token(token: str) -> str:
+    """
+    Computes the SHA-256 cryptographic digest of a share token.
+    PostgreSQL stores only this digest in `shares.token_hash`, never the raw token.
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
 class RateLimiter:
     """
     In-memory rate limiter to protect public share links against password brute-forcing.

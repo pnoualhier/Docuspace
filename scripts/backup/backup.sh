@@ -1,8 +1,24 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # =========================================================================
 # DocuSpace Backup Script - Automated Backup for PostgreSQL & MinIO S3
 # =========================================================================
-set -eo pipefail
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ENV_FILE="${ENV_FILE:-${PROJECT_ROOT}/.env}"
+
+if [ -f "${ENV_FILE}" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${ENV_FILE}"
+    set +a
+fi
+
+if [ -z "${POSTGRES_PASSWORD:-}" ]; then
+    echo "Error: POSTGRES_PASSWORD is not set. Load ${ENV_FILE} or export POSTGRES_PASSWORD." >&2
+    exit 1
+fi
 
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/docuspace}"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
@@ -26,19 +42,20 @@ echo "[*] Archiving MinIO Object Storage..."
 docker exec "${MINIO_CONTAINER}" tar -czf - /data \
     > "${BACKUP_DIR}/${TIMESTAMP}/minio_data_${TIMESTAMP}.tar.gz"
 
-# 3. Environment configuration backup (sanitized or encrypted recommended)
-if [ -f .env ]; then
-    cp .env "${BACKUP_DIR}/${TIMESTAMP}/env_backup_${TIMESTAMP}.bak"
+# 3. Environment configuration backup
+if [ -f "${ENV_FILE}" ]; then
+    cp "${ENV_FILE}" "${BACKUP_DIR}/${TIMESTAMP}/env_backup_${TIMESTAMP}.bak"
     chmod 600 "${BACKUP_DIR}/${TIMESTAMP}/env_backup_${TIMESTAMP}.bak"
 fi
 
 # 4. Generate SHA256 checksums
-cd "${BACKUP_DIR}/${TIMESTAMP}"
-sha256sum * > SHA256SUMS
-cd - > /dev/null
+(
+    cd "${BACKUP_DIR}/${TIMESTAMP}"
+    sha256sum * > SHA256SUMS
+)
 
 # 5. Rotate backups older than RETENTION_DAYS
 echo "[*] Pruning backups older than ${RETENTION_DAYS} days..."
-find "${BACKUP_DIR}" -maxdepth 1 -type d -mtime +${RETENTION_DAYS} -exec rm -rf {} +
+find "${BACKUP_DIR}" -maxdepth 1 -mindepth 1 -type d -mtime +"${RETENTION_DAYS}" -exec rm -rf {} +
 
 echo "[✓] Backup successfully completed at ${BACKUP_DIR}/${TIMESTAMP}"

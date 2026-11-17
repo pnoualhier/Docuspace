@@ -10,6 +10,7 @@ from backend.app.security.password import (
     hash_password, 
     verify_password, 
     generate_share_token, 
+    hash_share_token,
     share_rate_limiter,
     RateLimiter
 )
@@ -24,6 +25,7 @@ __all__ = [
     "hash_password",
     "verify_password",
     "generate_share_token",
+    "hash_share_token",
     "share_rate_limiter",
     "RateLimiter"
 ]

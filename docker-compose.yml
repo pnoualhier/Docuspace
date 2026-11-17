@@ -1,33 +1,33 @@
-version: '3.8'
-
 services:
   # =========================================================================
   # DocuSpace PostgreSQL Database with Row-Level Security (RLS)
+  # Internal network only — never exposed publicly
   # =========================================================================
   postgres:
     image: postgres:16-alpine
     container_name: docuspace-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-docuspace}
-      POSTGRES_USER: ${POSTGRES_USER:-docuspace_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-docuspace_secure_password_change_me}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./scripts/init/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - ./scripts/init/01_extensions.sql:/docker-entrypoint-initdb.d/01_extensions.sql:ro
+    expose:
+      - "5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-docuspace_user} -d ${POSTGRES_DB:-docuspace}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - docuspace-network
+      - docuspace-internal
 
   # =========================================================================
   # MinIO S3-Compatible Object Storage
+  # Internal network only — never exposed publicly
   # =========================================================================
   minio:
     image: minio/minio:RELEASE.2024-05-10T01-41-38Z
@@ -35,23 +35,24 @@ services:
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-docuspace_minio_admin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-docuspace_minio_secret_key_change_me}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set in .env}
     volumes:
       - minio_data:/data
-    ports:
-      - "${MINIO_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    expose:
+      - "9000"
+      - "9001"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
       interval: 15s
       timeout: 5s
       retries: 3
     networks:
-      - docuspace-network
+      - docuspace-internal
 
   # =========================================================================
   # ClamAV Antivirus Daemon (Fail-closed document scanner)
+  # Internal port 3310 only — egress allowed solely for freshclam CVD updates
   # =========================================================================
   clamav:
     image: clamav/clamav:latest
@@ -59,38 +60,44 @@ services:
     restart: unless-stopped
     volumes:
       - clamav_db:/var/lib/clamav
-    ports:
-      - "${CLAMAV_PORT:-3310}:3310"
+    expose:
+      - "3310"
     healthcheck:
       test: ["CMD", "clamdscan", "--ping", "10"]
       interval: 20s
       timeout: 10s
+      start_period: 120s
       retries: 5
     networks:
-      - docuspace-network
+      - docuspace-internal
+      - docuspace-edge
 
   # =========================================================================
-  # Redis Cache & Background Tasks
+  # Redis Cache & Rate-Limit Store
+  # Internal network only — password required, never exposed publicly
   # =========================================================================
   redis:
     image: redis:7-alpine
     container_name: docuspace-redis
     restart: unless-stopped
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_secure_pass_change_me}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
     volumes:
       - redis_data:/data
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
+    expose:
+      - "6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_secure_pass_change_me}", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 3
     networks:
-      - docuspace-network
+      - docuspace-internal
 
   # =========================================================================
-  # DocuSpace Backend API (FastAPI, Python 3.10+, SQLAlchemy 2)
+  # DocuSpace Backend API (FastAPI, Python 3.11, SQLAlchemy 2 Async)
+  # Non-root container, proxied exclusively through Nginx
   # =========================================================================
   backend:
     build:
@@ -105,63 +112,94 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      clamav:
+        condition: service_started
     env_file:
-      - ./infrastructure/docker/docker.env
+      - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-docuspace_user}:${POSTGRES_PASSWORD:-1931f981e26267c862f352c516b5f2bb}@postgres:5432/${POSTGRES_DB:-docuspace}
+      APP_ENV: ${APP_ENV:-production}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?POSTGRES_USER must be set}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB must be set}
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-docuspace_minio_admin}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-ab156e9361da7f2d77efb077221f5285}
-      MINIO_SECURE: "false"
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
       CLAMAV_HOST: clamav
       CLAMAV_PORT: "3310"
-      REDIS_URL: redis://:${REDIS_PASSWORD:-323da47d5b7bcb3aa99b4322f3260ce7}@redis:6379/0
+      CLAMAV_FAIL_CLOSED: "true"
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0
     volumes:
-      - ./backend:/app/backend
-    ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - quarantine_data:/tmp/docuspace/quarantine
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
     networks:
-      - docuspace-network
+      - docuspace-internal
+      - docuspace-edge
 
   # =========================================================================
-  # DocuSpace Frontend (React, TypeScript, Vite, Tailwind CSS)
+  # DocuSpace Frontend (React 19, TypeScript, Vite, Tailwind CSS)
+  # Unprivileged Nginx static container, proxied exclusively through Nginx
   # =========================================================================
   frontend:
     build:
       context: .
       dockerfile: infrastructure/docker/frontend.Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-/api/v1}
     container_name: docuspace-frontend
     restart: unless-stopped
     depends_on:
-      - backend
-    ports:
-      - "${FRONTEND_PORT:-3000}:3000"
-    environment:
-      - VITE_API_URL=http://localhost:${BACKEND_PORT:-8000}/api/v1
+      backend:
+        condition: service_healthy
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     networks:
-      - docuspace-network
+      - docuspace-edge
 
   # =========================================================================
-  # Nginx Reverse Proxy (SSL termination, rate limiting, secure headers)
+  # Nginx Reverse Proxy (Only public entrypoint: ports 80 & 443)
   # =========================================================================
   nginx:
     image: nginx:alpine
     container_name: docuspace-nginx
     restart: unless-stopped
     depends_on:
-      - frontend
-      - backend
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
     ports:
       - "${HTTP_PORT:-80}:80"
       - "${HTTPS_PORT:-443}:443"
     volumes:
       - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - nginx_logs:/var/log/nginx
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/nginx-health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     networks:
-      - docuspace-network
+      - docuspace-edge
 
 networks:
-  docuspace-network:
+  docuspace-internal:
+    driver: bridge
+    internal: true
+  docuspace-edge:
     driver: bridge
 
 volumes:
@@ -169,4 +207,5 @@ volumes:
   minio_data:
   clamav_db:
   redis_data:
+  quarantine_data:
   nginx_logs:

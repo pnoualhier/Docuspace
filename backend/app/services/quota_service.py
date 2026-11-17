@@ -3,7 +3,7 @@ from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func, update, text
 
 from backend.app.models.tenant import StorageUsage, Tenant
 from backend.app.models.plan import Plan
@@ -72,6 +72,31 @@ class QuotaService:
     Provides row-level locking (SELECT ... FOR UPDATE) for atomic reservations,
     plan tier limit enforcement, and S3/MinIO reconciliation tasks.
     """
+
+    @staticmethod
+    async def _commit_preserving_rls(db: AsyncSession) -> None:
+        tid, su = None, None
+        try:
+            row = (await db.execute(
+                text("SELECT current_setting('app.current_tenant_id', true), current_setting('app.is_superuser', true)")
+            )).first()
+            if row:
+                tid, su = row[0], row[1]
+        except Exception:
+            pass
+        await db.commit()
+        if tid or su == "true":
+            try:
+                await db.execute(
+                    text("SELECT set_config('app.current_tenant_id', :tid, true)"),
+                    {"tid": tid or ""},
+                )
+                await db.execute(
+                    text("SELECT set_config('app.is_superuser', :su, true)"),
+                    {"su": su or "false"},
+                )
+            except Exception:
+                pass
 
     def __init__(self):
         # Fallback cache for offline unit tests where database is mocked
@@ -184,7 +209,7 @@ class QuotaService:
         # 3. Atomically increment reserved_bytes in PostgreSQL
         storage_usage.reserved_bytes += file_size_bytes
         storage_usage.updated_at = datetime.now(timezone.utc)
-        await db.commit()
+        await self._commit_preserving_rls(db)
 
         # Update cache for sync tests if applicable
         self.get_or_create_usage(str(tenant_id), plan.max_storage_bytes)["reserved_bytes"] = storage_usage.reserved_bytes
@@ -215,7 +240,7 @@ class QuotaService:
         storage_usage.used_bytes += file_size_bytes
         storage_usage.document_count += 1
         storage_usage.updated_at = datetime.now(timezone.utc)
-        await db.commit()
+        await self._commit_preserving_rls(db)
 
         # Sync cache
         c = self.get_or_create_usage(str(tenant_id))
@@ -236,7 +261,7 @@ class QuotaService:
         storage_usage, _ = await self.get_or_create_db_usage(db, tenant_id)
         storage_usage.reserved_bytes = max(0, storage_usage.reserved_bytes - file_size_bytes)
         storage_usage.updated_at = datetime.now(timezone.utc)
-        await db.commit()
+        await self._commit_preserving_rls(db)
 
         # Sync cache
         self.get_or_create_usage(str(tenant_id))["reserved_bytes"] = storage_usage.reserved_bytes
@@ -254,7 +279,7 @@ class QuotaService:
         storage_usage.used_bytes = max(0, storage_usage.used_bytes - file_size_bytes)
         storage_usage.document_count = max(0, storage_usage.document_count - 1)
         storage_usage.updated_at = datetime.now(timezone.utc)
-        await db.commit()
+        await self._commit_preserving_rls(db)
 
         # Sync cache
         c = self.get_or_create_usage(str(tenant_id))
@@ -332,7 +357,7 @@ class QuotaService:
         storage_usage.reserved_bytes = 0 # Clear stale reservations
         storage_usage.last_recalculated_at = datetime.now(timezone.utc)
         storage_usage.updated_at = datetime.now(timezone.utc)
-        await db.commit()
+        await self._commit_preserving_rls(db)
 
         # Update cache
         c = self.get_or_create_usage(str(tenant_id))

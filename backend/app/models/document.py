@@ -20,6 +20,10 @@ class Folder(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
+    __table_args__ = (
+        UniqueConstraint("id", "tenant_id", name="uq_folders_id_tenant"),
+    )
+
     tenant = relationship("Tenant", back_populates="folders")
     parent = relationship("Folder", remote_side=[id], backref="subfolders")
     documents = relationship("Document", back_populates="folder")
@@ -50,6 +54,10 @@ class Document(Base):
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("id", "tenant_id", name="uq_documents_id_tenant"),
+    )
 
     tenant = relationship("Tenant", back_populates="documents")
     folder = relationship("Folder", back_populates="documents")

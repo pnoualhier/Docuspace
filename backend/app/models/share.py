@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Integer, CheckConstraint, UniqueConstraint
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, ForeignKeyConstraint, Integer, CheckConstraint, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -16,7 +16,7 @@ class Share(Base):
     share_type = Column(String(32), nullable=False) # INTERNAL_USER or SECURE_LINK
     role = Column(String(32), ForeignKey("roles.name"), default="VIEWER", nullable=False)
     
-    # Secure Link specifics
+    # Secure Link specifics (token_hash stores SHA-256 hex digest, never raw token)
     token_hash = Column(String(255), unique=True, index=True, nullable=True)
     password_hash = Column(String(255), nullable=True)
     max_downloads = Column(Integer, nullable=True)
@@ -32,22 +32,48 @@ class Share(Base):
             "(document_id IS NOT NULL AND folder_id IS NULL) OR (document_id IS NULL AND folder_id IS NOT NULL)",
             name="chk_share_target"
         ),
+        CheckConstraint(
+            "share_type IN ('INTERNAL_USER', 'SECURE_LINK')",
+            name="chk_share_type"
+        ),
+        CheckConstraint(
+            "role IN ('VIEWER', 'EDITOR', 'GUEST')",
+            name="chk_share_role"
+        ),
+        ForeignKeyConstraint(
+            ["document_id", "tenant_id"],
+            ["documents.id", "documents.tenant_id"],
+            name="fk_shares_document_same_tenant",
+            ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(
+            ["folder_id", "tenant_id"],
+            ["folders.id", "folders.tenant_id"],
+            name="fk_shares_folder_same_tenant",
+            ondelete="CASCADE"
+        ),
     )
 
     recipients = relationship("ShareRecipient", back_populates="share", cascade="all, delete-orphan")
+    document = relationship("Document", foreign_keys=[document_id])
+    folder = relationship("Folder", foreign_keys=[folder_id])
 
 class ShareRecipient(Base):
     __tablename__ = "share_recipients"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     share_id = Column(UUID(as_uuid=True), ForeignKey("shares.id", ondelete="CASCADE"), nullable=False)
-    recipient_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
-    recipient_email = Column(String(255), nullable=False)
+    recipient_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    recipient_email = Column(String(255), nullable=False, index=True)
     role = Column(String(32), ForeignKey("roles.name"), default="VIEWER", nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     __table_args__ = (
         UniqueConstraint("share_id", "recipient_email", name="uq_share_recipient"),
+        CheckConstraint(
+            "role IN ('VIEWER', 'EDITOR', 'GUEST')",
+            name="chk_share_recipient_role"
+        ),
     )
 
     share = relationship("Share", back_populates="recipients")
