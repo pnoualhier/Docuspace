@@ -8,24 +8,25 @@ Conçue comme un **monolithe modulaire multi-tenant**, DocuSpace garantit une so
 
 ## 🚀 Fonctionnalités Clés
 
-- **Architecture Modulaire Multi-Tenant** : Chaque utilisateur dispose d'un espace documentaire étanche, avec contexte PostgreSQL RLS dédié (`FORCE ROW LEVEL SECURITY`).
-- **Sécurité Fail-Closed** : Hachage de mot de passe par **Argon2id**, sessions persistées avec rotation et révocation, cookies HttpOnly, en-têtes HTTP stricts, contrôle d'intégrité SHA-256.
-- **Stockage S3 / MinIO** : Clés de stockage aléatoires, streaming direct par blocs, réconciliation des quotas en PostgreSQL.
-- **Protection Antivirus ClamAV Fail-Closed** : Scan systématique en flux avec mise en quarantaine isolée et blocage strict de tout fichier non analysé (`SCAN_ERROR` / `INFECTED`).
-- **Gestion des Quotas Transactionnels** : Suivi atomique des octets réservés et consommés selon les forfaits en base (Gratuit 500 Mo, Personnel 20 Go, Premium 100 Go).
-- **Partage Persisté en PostgreSQL** : Liens publics hachés SHA-256, protection par mot de passe Argon2id, limite atomique de téléchargements et journaux d'audit.
-- **Interface Utilisateur Moderne (React 19, TypeScript, Tailwind CSS)** : Navigation fluide, visualiseur de documents, glisser-déposer et console d'administration.
+- **Architecture Modulaire Multi-Tenant & RLS (`FORCE ROW LEVEL SECURITY`)** : Chaque utilisateur dispose d'un espace documentaire étanche sous rôle PostgreSQL non-privilégié (`NOSUPERUSER NOBYPASSRLS`) couvrant `tenants`, `folders`, `documents`, `document_versions`, `shares`, `share_recipients`, `notifications` et `quarantine_events`.
+- **Sécurité Fail-Closed & Rate Limiting Distribué** : Hachage **Argon2id**, sessions avec rotation de `refresh_token` et révocation, cookies HttpOnly, en-têtes HTTP stricts, logs JSON structurés sans fuite de secrets, et limitation de débit distribuée via Redis (`SlidingRateLimiter`).
+- **Stockage S3 / MinIO Fail-Closed** : SDK `minio.Minio` strict (HTTP 503 si indisponible), clés cryptographiques aléatoires, streaming par blocs (64 Ko), normalisation des noms (`sanitize_filename`), rejet des doubles extensions exécutables (`facture.exe.pdf`), copie S3/DB et réconciliation exacte documents + versions.
+- **Protection Antivirus ClamAV Fail-Closed** : Scan systématique en flux (`zINSTREAM`) avec mise en quarantaine isolée persistée (`quarantine_events`) et blocage strict de tout fichier non certifié (`SCAN_ERROR` / `INFECTED`).
+- **Gestion des Dossiers, Versions, Corbeille & Quotas** : Arborescence récursive sans cycles, suppression récursive avec désactivation des partages, historique des versions borné par forfait (`Plan.max_versions_per_file`), corbeille 30 jours avec purge MinIO et restitution de quota atomique.
+- **Partage Persisté en PostgreSQL** : Partages internes (`set_user_recipient_context` RLS) et liens publics hachés SHA-256 avec mot de passe Argon2id, limite de téléchargements, expiration et modification via `PATCH /api/v1/shares/{share_id}`.
+- **Facturation, Notifications, Admin & RGPD** : Abonnements Stripe (webhooks HMAC-SHA256, mode lecture seule automatique sur dépassement), notifications in-app sous RLS (seuils 80%/100%), console Superadmin (export CSV protégé contre l'injection de formules) et conformité RGPD (Art. 17 & 20).
+- **Interface Utilisateur Moderne (React 19, TypeScript, Tailwind CSS)** : Zéro popup native (`ConfirmActionModal`, `RenameModal` accessibles), progression XHR temps réel, client API synchronisé (`src/services/api.ts`) et mode aperçu hors-ligne.
 
 ---
 
 ## 🛠️ Stack Technique
 
-- **Frontend** : React 19, TypeScript, Vite, Tailwind CSS, Lucide Icons, Motion.
-- **Backend** : Python 3.11, FastAPI, SQLAlchemy 2 (Async), Pydantic v2, Alembic.
-- **Base de données** : PostgreSQL 16 avec extensions `uuid-ossp`, `pgcrypto` et RLS (`FORCE ROW LEVEL SECURITY`).
+- **Frontend** : React 19, TypeScript, Vite, Tailwind CSS, Lucide Icons, Motion, Vitest.
+- **Backend** : Python 3.11, FastAPI, SQLAlchemy 2 (Async), Pydantic v2, Alembic (`0008_notif_rls_quarantine`).
+- **Base de données** : PostgreSQL 16 avec extensions `uuid-ossp`, `pgcrypto` et `FORCE ROW LEVEL SECURITY`.
 - **Stockage Objets** : MinIO S3-compatible (réseau interne uniquement).
 - **Antivirus & Cache** : ClamAV Daemon & Redis 7 (réseau interne uniquement).
-- **Déploiement** : Docker & Docker Compose sur Debian 12 avec Nginx en reverse proxy (seuls les ports 80/443 sont exposés).
+- **Déploiement & CI/CD** : Docker & Docker Compose sur Debian 12/13 avec Nginx en reverse proxy (seuls les ports 80/443 sont exposés), GitHub Actions (`backend-real-services`, `frontend-tests-and-build`, `docker-validation`).
 
 ---
 
@@ -52,8 +53,24 @@ L'application est disponible uniquement via le reverse proxy Nginx :
 
 ---
 
+## 🧪 Tests & Vérification
+
+```bash
+# Backend (93 tests : unitaires, PostgreSQL RLS réel, Redis réel, pg_dump/pg_restore)
+python3 -m pytest backend/tests/ -v
+
+# Frontend (10 tests Vitest, contrôle TypeScript & build production)
+npm test
+npm run lint
+npm run build
+```
+
+---
+
 ## 📚 Documentation Détaillée
 
+- [Contexte Technique & État du Projet](CONTEXT.md)
+- [Journal des Modifications (Changelog)](CHANGELOG.md)
 - [Architecture Globale](docs/architecture/ARCHITECTURE.md)
 - [Modèle de Données & RLS](docs/architecture/DATABASE.md)
 - [Politique de Sécurité & Antivirus](docs/security/SECURITY.md)
