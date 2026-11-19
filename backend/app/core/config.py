@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     # Redis — zero hardcoded password defaults
     REDIS_URL: str = os.getenv("REDIS_URL", "")
 
+    # Billing / Stripe — configured via environment
+    STRIPE_API_KEY: str = os.getenv("STRIPE_API_KEY", "")
+    STRIPE_WEBHOOK_SECRET: str = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+
     # CORS
     BACKEND_CORS_ORIGINS: List[str] = [
         "http://localhost",

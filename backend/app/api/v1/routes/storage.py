@@ -14,13 +14,14 @@ from backend.app.middleware.tenant_context import (
     require_permission, 
     Permission
 )
-from backend.app.storage.s3_storage import storage_client
+from backend.app.storage.s3_storage import storage_client, StorageBackendError
 from backend.app.storage.storage_interface import (
     is_prohibited_extension, 
     is_prohibited_mime_type, 
     PROHIBITED_EXTENSIONS
 )
 from backend.app.storage.upload_service import (
+    sanitize_filename,
     stream_and_verify_upload,
     generate_secure_storage_key,
     validate_folder_ownership,
@@ -35,6 +36,7 @@ from backend.app.services.quota_service import (
     FileSizeLimitExceededError
 )
 from backend.app.models.document import Document, DocumentVersion, UploadSession, Folder
+from backend.app.models.audit import AuditLog, QuarantineEvent
 from backend.app.models.tenant import StorageUsage
 from backend.app.models.plan import Plan
 from backend.app.schemas.storage import (
@@ -50,9 +52,6 @@ from backend.app.schemas.document import DocumentRead
 
 router = APIRouter(tags=["Stockage & Antivirus"])
 
-# In-memory upload session registry for fast test lookup fallback
-_ACTIVE_UPLOAD_SESSIONS: Dict[str, Dict[str, Any]] = {}
-
 @router.post("/upload/initiate", response_model=UploadInitiateResponse, status_code=status.HTTP_201_CREATED)
 async def initiate_upload(
     req: UploadInitiateRequest,
@@ -67,8 +66,10 @@ async def initiate_upload(
     4. Clé de stockage cryptographiquement aléatoire et URL pré-signée S3 / MinIO.
     5. Persistance de la session d'upload dans la table upload_sessions.
     """
+    safe_name = sanitize_filename(req.original_name)
+
     # 1. File extension validation
-    if is_prohibited_extension(req.original_name):
+    if is_prohibited_extension(safe_name):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Format de fichier interdit pour des raisons de sécurité. Les exécutables et scripts ne sont pas autorisés."
@@ -103,15 +104,22 @@ async def initiate_upload(
         )
 
     # 4. Generate isolated cryptographically random S3 storage key & pre-signed URL
-    storage_key, clean_ext = generate_secure_storage_key(context.tenant.id, req.original_name)
+    storage_key, clean_ext = generate_secure_storage_key(context.tenant.id, safe_name)
     upload_token = f"upl_tok_{uuid.uuid4().hex}"
 
-    presigned = storage_client.generate_presigned_upload_url(
-        storage_key=storage_key,
-        content_type=req.mime_type,
-        max_size_bytes=req.size_bytes,
-        expires_in=1800
-    )
+    try:
+        presigned = storage_client.generate_presigned_upload_url(
+            storage_key=storage_key,
+            content_type=req.mime_type,
+            max_size_bytes=req.size_bytes,
+            expires_in=1800
+        )
+    except StorageBackendError as exc:
+        await quota_service.release_reservation_db(db, context.tenant.id, req.size_bytes)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Service de stockage S3/MinIO indisponible : {exc}"
+        )
 
     # 5. Persist upload session in PostgreSQL
     session_record = await create_persisted_upload_session(
@@ -119,7 +127,7 @@ async def initiate_upload(
         tenant_id=context.tenant.id,
         user_id=context.user.id,
         folder_id=req.folder_id,
-        original_name=req.original_name,
+        original_name=safe_name,
         extension=clean_ext,
         mime_type=req.mime_type,
         size_bytes=req.size_bytes,
@@ -127,22 +135,6 @@ async def initiate_upload(
         upload_token=upload_token,
         expires_minutes=30
     )
-
-    # Sync test fallback
-    _ACTIVE_UPLOAD_SESSIONS[str(session_record.id)] = {
-        "id": session_record.id,
-        "tenant_id": context.tenant.id,
-        "user_id": context.user.id,
-        "folder_id": req.folder_id,
-        "original_name": req.original_name,
-        "extension": clean_ext,
-        "mime_type": req.mime_type,
-        "size_bytes": req.size_bytes,
-        "storage_key": storage_key,
-        "upload_token": upload_token,
-        "status": "INITIATED",
-        "expires_at": presigned["expires_at"]
-    }
 
     return UploadInitiateResponse(
         session_id=session_record.id,
@@ -171,7 +163,7 @@ async def direct_upload(
     - Contrôle antivirus ClamAV temps-réel (politique fail-closed)
     - Stockage MinIO avec clé aléatoire et enregistrement Document + Version
     """
-    filename = file.filename or "sans-nom"
+    filename = sanitize_filename(file.filename)
 
     # 1. Folder ownership validation
     if folder_id:
@@ -206,8 +198,7 @@ async def direct_upload(
         # Threat or scan error: release reserved quota in DB immediately
         await quota_service.release_reservation_db(db, context.tenant.id, file_size)
         if scan_result.status == "INFECTED":
-            # Isolate in secure quarantine storage
-            quarantine_manager.quarantine_file(
+            q_rec = quarantine_manager.quarantine_file(
                 storage_client=storage_client,
                 tenant_id=context.tenant.id,
                 storage_key="",
@@ -215,11 +206,41 @@ async def direct_upload(
                 threat_name=scan_result.threat_name or "Menace détectée",
                 content=content
             )
+            db.add(QuarantineEvent(
+                tenant_id=context.tenant.id,
+                user_id=context.user.id,
+                original_name=filename,
+                threat_name=scan_result.threat_name or "Menace détectée",
+                quarantine_key=q_rec.get("quarantine_key", ""),
+                size_bytes=file_size,
+                status="QUARANTINED",
+            ))
+            db.add(AuditLog(
+                tenant_id=context.tenant.id,
+                user_id=context.user.id,
+                action="AV_THREAT_QUARANTINED",
+                resource_type="UPLOAD",
+                details={
+                    "filename": filename,
+                    "threat_name": scan_result.threat_name,
+                    "quarantine_key": q_rec.get("quarantine_key"),
+                    "size_bytes": file_size,
+                }
+            ))
+            await db.commit()
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Alerte de sécurité ClamAV : {scan_result.threat_name or 'Menace détectée'}. Fichier placé en quarantaine isolée. {scan_result.details}"
             )
-        else: # SCAN_ERROR (ClamAV unavailable, timeout, invalid response)
+        else:  # SCAN_ERROR (ClamAV unavailable, timeout, invalid response)
+            db.add(AuditLog(
+                tenant_id=context.tenant.id,
+                user_id=context.user.id,
+                action="AV_SCAN_FAILED",
+                resource_type="UPLOAD",
+                details={"filename": filename, "reason": scan_result.details, "size_bytes": file_size}
+            ))
+            await db.commit()
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=f"Échec de l'analyse antivirus (Fail-Closed) : {scan_result.details}. Aucun fichier non analysé ne peut être importé."
@@ -228,8 +249,15 @@ async def direct_upload(
     # 6. Store in S3 / MinIO with secure random key
     storage_key, clean_ext = generate_secure_storage_key(context.tenant.id, filename)
     doc_id = uuid.uuid4()
-    
-    storage_client.put_object(storage_key, content, real_mime)
+
+    try:
+        storage_client.put_object(storage_key, content, real_mime)
+    except StorageBackendError as exc:
+        await quota_service.release_reservation_db(db, context.tenant.id, file_size)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Échec du stockage objet S3/MinIO : {exc}"
+        )
 
     # 7. Commit storage quota in PostgreSQL
     await quota_service.commit_quota_db(db, context.tenant.id, file_size)
@@ -272,12 +300,23 @@ async def direct_upload(
     try:
         db.add(new_doc)
         db.add(initial_version)
+        db.add(AuditLog(
+            tenant_id=context.tenant.id,
+            user_id=context.user.id,
+            action="DOC_UPLOAD",
+            resource_type="DOCUMENT",
+            resource_id=doc_id,
+            details={"filename": filename, "size_bytes": file_size, "mime_type": real_mime}
+        ))
         await db.flush()
         await db.refresh(new_doc)
         await db.commit()
     except Exception:
         # Atomic rollback and object removal
-        storage_client.delete_object(storage_key)
+        try:
+            storage_client.delete_object(storage_key)
+        except Exception:
+            pass
         await quota_service.reclaim_quota_db(db, context.tenant.id, file_size)
         await db.rollback()
         raise HTTPException(
@@ -336,11 +375,19 @@ async def complete_upload(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Fichier téléversé introuvable sur le stockage S3/MinIO."
         )
+    except StorageBackendError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Erreur d'accès stockage S3/MinIO : {exc}"
+        )
 
     # 3. Verify SHA-256
     actual_hash = storage_client.compute_sha256(content)
     if req.sha256_hash and req.sha256_hash.lower() != actual_hash.lower():
-        storage_client.delete_object(storage_key)
+        try:
+            storage_client.delete_object(storage_key)
+        except Exception:
+            pass
         session.status = "FAILED"
         await quota_service.release_reservation_db(db, context.tenant.id, session.size_bytes)
         await db.commit()
@@ -349,19 +396,16 @@ async def complete_upload(
             detail="Échec de validation d'intégrité : l'empreinte SHA-256 calculée ne correspond pas au hachage déclaré."
         )
 
-    # 4. ClamAV Scan (Strict Fail-Closed)
+    # 4. Transition to SCANNING & run ClamAV Scan (Strict Fail-Closed)
+    session.status = "SCANNING"
+    await db.flush()
+
     scan_result: ScanResult = clamav_scanner.scan_bytes(content)
     if not scan_result.is_clean:
-        storage_client.delete_object(storage_key)
         await quota_service.release_reservation_db(db, context.tenant.id, session.size_bytes)
-        _ACTIVE_UPLOAD_SESSIONS.pop(str(req.session_id), None)
 
         if scan_result.status == "INFECTED":
-            session.status = "INFECTED"
-            session.antivirus_status = scan_result.status
-            session.antivirus_details = scan_result.details
-            await db.commit()
-            quarantine_manager.quarantine_file(
+            q_rec = quarantine_manager.quarantine_file(
                 storage_client=storage_client,
                 tenant_id=context.tenant.id,
                 storage_key=storage_key,
@@ -369,14 +413,51 @@ async def complete_upload(
                 threat_name=scan_result.threat_name or "Menace détectée",
                 content=content
             )
+            session.status = "INFECTED"
+            session.antivirus_status = scan_result.status
+            session.antivirus_details = scan_result.details
+            db.add(QuarantineEvent(
+                tenant_id=context.tenant.id,
+                user_id=context.user.id,
+                original_name=session.original_name,
+                threat_name=scan_result.threat_name or "Menace détectée",
+                quarantine_key=q_rec.get("quarantine_key", ""),
+                size_bytes=session.size_bytes,
+                status="QUARANTINED",
+            ))
+            db.add(AuditLog(
+                tenant_id=context.tenant.id,
+                user_id=context.user.id,
+                action="AV_THREAT_QUARANTINED",
+                resource_type="UPLOAD_SESSION",
+                resource_id=session.id,
+                details={
+                    "filename": session.original_name,
+                    "threat_name": scan_result.threat_name,
+                    "quarantine_key": q_rec.get("quarantine_key"),
+                }
+            ))
+            await db.commit()
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Fichier rejeté et mis en quarantaine. Menace ClamAV détectée : {scan_result.threat_name}"
             )
-        else: # SCAN_ERROR (ClamAV unavailable, timeout, invalid response)
+        else:  # SCAN_ERROR (ClamAV unavailable, timeout, invalid response)
+            try:
+                storage_client.delete_object(storage_key)
+            except Exception:
+                pass
             session.status = "SCAN_ERROR"
             session.antivirus_status = scan_result.status
             session.antivirus_details = scan_result.details
+            db.add(AuditLog(
+                tenant_id=context.tenant.id,
+                user_id=context.user.id,
+                action="AV_SCAN_FAILED",
+                resource_type="UPLOAD_SESSION",
+                resource_id=session.id,
+                details={"filename": session.original_name, "reason": scan_result.details}
+            ))
             await db.commit()
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -389,7 +470,6 @@ async def complete_upload(
     session.antivirus_status = scan_result.status
     session.sha256_hash = actual_hash
     session.completed_at = datetime.now(timezone.utc)
-    _ACTIVE_UPLOAD_SESSIONS.pop(str(req.session_id), None)
 
     doc_id = uuid.uuid4()
     new_doc = Document(
@@ -429,10 +509,23 @@ async def complete_upload(
     try:
         db.add(new_doc)
         db.add(initial_version)
+        db.add(AuditLog(
+            tenant_id=context.tenant.id,
+            user_id=context.user.id,
+            action="DOC_UPLOAD",
+            resource_type="DOCUMENT",
+            resource_id=doc_id,
+            details={"filename": session.original_name, "size_bytes": session.size_bytes, "session_id": str(session.id)}
+        ))
         await db.flush()
         await db.refresh(new_doc)
         await db.commit()
     except Exception:
+        try:
+            storage_client.delete_object(storage_key)
+        except Exception:
+            pass
+        await quota_service.reclaim_quota_db(db, context.tenant.id, session.size_bytes)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -501,28 +594,44 @@ async def get_download_url(
         )
 
     # Strict Fail-Closed download barrier:
-    # Aucun fichier non analysé ne doit être rendu disponible au téléchargement
-    if doc.antivirus_status != "CLEAN":
-        if doc.antivirus_status == "INFECTED":
+    # Aucun fichier non analysé ou non prêt ne doit être rendu disponible au téléchargement
+    if doc.antivirus_status != "CLEAN" or doc.status != "READY":
+        if doc.antivirus_status == "INFECTED" or doc.status == "QUARANTINED":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Téléchargement strictement interdit : ce fichier est infecté ({doc.antivirus_details or 'Menace détectée'}) et placé en quarantaine."
             )
-        else: # SCAN_ERROR, PENDING
+        else:  # SCAN_ERROR, PENDING, FAILED, UPLOADING, etc.
             raise HTTPException(
                 status_code=status.HTTP_423_LOCKED,
-                detail=f"Téléchargement bloqué (Fail-Closed) : le fichier n'a pas été certifié sain par ClamAV (statut antivirus: {doc.antivirus_status})."
+                detail=f"Téléchargement bloqué (Fail-Closed) : le fichier n'est pas certifié sain par ClamAV (statut: {doc.status}, statut antivirus: {doc.antivirus_status})."
             )
 
     filename = doc.original_name
     storage_key = doc.storage_key
 
-    # Generate 15-minute presigned download URL
-    download_url = storage_client.generate_presigned_download_url(
-        storage_key=storage_key,
-        filename=filename,
-        expires_in=900
-    )
+    try:
+        download_url = storage_client.generate_presigned_download_url(
+            storage_key=storage_key,
+            filename=filename,
+            expires_in=900
+        )
+    except StorageBackendError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Impossible de générer le lien de téléchargement MinIO : {exc}"
+        )
+
+    if hasattr(db, "add") and hasattr(db, "commit"):
+        db.add(AuditLog(
+            tenant_id=context.tenant.id,
+            user_id=context.user.id,
+            action="DOC_DOWNLOAD",
+            resource_type="DOCUMENT",
+            resource_id=document_id,
+            details={"filename": filename}
+        ))
+        await db.commit()
 
     return DownloadUrlResponse(
         document_id=document_id,
@@ -563,6 +672,11 @@ async def trigger_antivirus_scan(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Fichier introuvable sur le stockage."
         )
+    except StorageBackendError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Erreur d'accès stockage S3/MinIO : {exc}"
+        )
 
     scan_result = clamav_scanner.scan_bytes(content)
 
@@ -571,7 +685,7 @@ async def trigger_antivirus_scan(
 
     if scan_result.status == "INFECTED":
         doc.status = "QUARANTINED"
-        quarantine_manager.quarantine_file(
+        q_rec = quarantine_manager.quarantine_file(
             storage_client=storage_client,
             tenant_id=context.tenant_id,
             storage_key=storage_key,
@@ -579,6 +693,27 @@ async def trigger_antivirus_scan(
             threat_name=scan_result.threat_name or "Menace détectée",
             content=content
         )
+        db.add(QuarantineEvent(
+            tenant_id=context.tenant.id,
+            user_id=context.user.id,
+            original_name=doc.original_name,
+            threat_name=scan_result.threat_name or "Menace détectée",
+            quarantine_key=q_rec.get("quarantine_key", ""),
+            size_bytes=doc.size_bytes,
+            status="QUARANTINED",
+        ))
+        db.add(AuditLog(
+            tenant_id=context.tenant.id,
+            user_id=context.user.id,
+            action="AV_THREAT_QUARANTINED",
+            resource_type="DOCUMENT",
+            resource_id=document_id,
+            details={"filename": doc.original_name, "threat_name": scan_result.threat_name}
+        ))
+    elif scan_result.status == "CLEAN":
+        doc.status = "READY"
+    else:
+        doc.status = "FAILED"
 
     try:
         await db.commit()
@@ -596,11 +731,33 @@ async def trigger_antivirus_scan(
 
 @router.get("/quarantine", tags=["Stockage & Antivirus"])
 async def list_quarantine_records(
-    context: TenantContext = Depends(require_permission(Permission.DOCUMENT_READ))
+    context: TenantContext = Depends(require_permission(Permission.DOCUMENT_READ)),
+    db: AsyncSession = Depends(get_db)
 ):
     """
-    Liste les fichiers placés en quarantaine isolée pour cet espace documentaire.
+    Liste les fichiers placés en quarantaine isolée pour cet espace documentaire (persistés en PostgreSQL).
     """
+    res = await db.execute(
+        select(QuarantineEvent)
+        .where(QuarantineEvent.tenant_id == context.tenant.id)
+        .order_by(QuarantineEvent.created_at.desc())
+        .limit(100)
+    )
+    rows = res.scalars().all()
+    if rows:
+        return [
+            {
+                "quarantine_id": str(r.id),
+                "tenant_id": str(r.tenant_id),
+                "original_name": r.original_name,
+                "threat_name": r.threat_name,
+                "quarantine_key": r.quarantine_key,
+                "size_bytes": r.size_bytes,
+                "isolated_at": r.created_at.isoformat() if r.created_at else None,
+                "status": r.status,
+            }
+            for r in rows
+        ]
     return quarantine_manager.list_quarantined_files(context.tenant_id)
 
 @router.get("/quota", response_model=QuotaInfoResponse)

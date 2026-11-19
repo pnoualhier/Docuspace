@@ -64,6 +64,7 @@ interface FileExplorerProps {
   onBulkTrash: (docIds: string[]) => void;
   onBulkRestore?: (docIds: string[]) => void;
   onBulkPurge?: (docIds: string[]) => void;
+  onBulkDownload?: (docIds: string[]) => void;
   onEmptyTrash?: () => void;
   isTrashView?: boolean;
   userRole?: 'OWNER' | 'EDITOR' | 'VIEWER' | 'GUEST';
@@ -98,6 +99,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
   onBulkTrash,
   onBulkRestore,
   onBulkPurge,
+  onBulkDownload,
   onEmptyTrash,
   isTrashView = false,
   userRole = 'OWNER',
@@ -338,8 +340,8 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
             {!isTrashView ? (
               <>
                 <button
-                  onClick={() => alert(`Téléchargement groupé de ${selectedDocIds.length} fichiers sous archive ZIP sécurisée.`)}
-                  className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium flex items-center space-x-1.5 transition-colors"
+                  onClick={() => onBulkDownload && onBulkDownload(selectedDocIds)}
+                  className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium flex items-center space-x-1.5 transition-colors whitespace-nowrap"
                 >
                   <Download className="w-3.5 h-3.5" />
                   <span>Télécharger (.ZIP)</span>

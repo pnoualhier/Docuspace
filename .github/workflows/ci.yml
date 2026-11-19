@@ -105,3 +105,20 @@ jobs:
           npm run lint
           npm test
           npm run build
+
+  docker-validation:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate backup/restore scripts & Docker Compose configuration
+        run: |
+          bash -n scripts/backup/backup.sh scripts/restore/restore.sh
+          cp .env.example .env
+          docker compose config -q
+
+      - name: Build backend & frontend Docker images
+        run: |
+          docker build -f infrastructure/docker/backend.Dockerfile -t docuspace-backend:ci .
+          docker build -f infrastructure/docker/frontend.Dockerfile -t docuspace-frontend:ci .
+

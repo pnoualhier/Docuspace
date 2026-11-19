@@ -3,7 +3,7 @@ from backend.app.models.user import User, Session
 from backend.app.models.tenant import Tenant, Role, TenantMember, StorageUsage, PermissionModel, RolePermission
 from backend.app.models.document import Folder, Document, DocumentVersion, UploadSession
 from backend.app.models.share import Share, ShareRecipient
-from backend.app.models.audit import AuditLog, Notification
+from backend.app.models.audit import AuditLog, Notification, QuarantineEvent
 
 __all__ = [
     "Plan",
@@ -23,4 +23,5 @@ __all__ = [
     "ShareRecipient",
     "AuditLog",
     "Notification",
+    "QuarantineEvent",
 ]

@@ -28,18 +28,22 @@ interface FilePreviewModalProps {
   document: DocumentItem | null;
   onClose: () => void;
   onShare: (doc: DocumentItem) => void;
+  onRequestDownload?: (doc: DocumentItem) => Promise<string | null>;
 }
 
 export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
   document,
   onClose,
   onShare,
+  onRequestDownload,
 }) => {
   const [copiedHash, setCopiedHash] = useState(false);
   const [pdfPage, setPdfPage] = useState(1);
   const [pdfZoom, setPdfZoom] = useState(100);
   const [tableSearch, setTableSearch] = useState('');
   const [copiedCode, setCopiedCode] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [isDownloading, setIsDownloading] = useState(false);
 
   if (!document) return null;
 
@@ -55,9 +59,31 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
     setTimeout(() => setCopiedCode(false), 2000);
   };
 
-  const handleDownload = () => {
-    const blob = new Blob([document.contentPreview || 'DocuSpace Secure Document Content'], { 
-      type: document.mimeType 
+  const handleDownload = async () => {
+    setDownloadError(null);
+    if (onRequestDownload) {
+      setIsDownloading(true);
+      try {
+        const presignedUrl = await onRequestDownload(document);
+        if (presignedUrl) {
+          const a = window.document.createElement('a');
+          a.href = presignedUrl;
+          a.download = document.originalName;
+          a.click();
+          return;
+        }
+      } catch (err: unknown) {
+        setDownloadError(
+          err instanceof Error ? err.message : 'Téléchargement refusé par la politique de sécurité.'
+        );
+        return;
+      } finally {
+        setIsDownloading(false);
+      }
+    }
+
+    const blob = new Blob([document.contentPreview || 'DocuSpace Secure Document Content'], {
+      type: document.mimeType,
     });
     const url = URL.createObjectURL(blob);
     const a = window.document.createElement('a');
@@ -127,20 +153,31 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
             </button>
             <button
               onClick={handleDownload}
-              className="p-2 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors text-xs flex items-center space-x-1.5 shadow-sm"
+              disabled={isDownloading}
+              className="p-2 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-medium transition-colors text-xs flex items-center space-x-1.5 shadow-sm whitespace-nowrap"
               title="Télécharger"
             >
               <Download className="w-3.5 h-3.5" />
-              <span>Télécharger</span>
+              <span>{isDownloading ? 'Préparation...' : 'Télécharger'}</span>
             </button>
             <button
               onClick={onClose}
+              aria-label="Fermer l'aperçu"
               className="p-2 rounded-xl bg-slate-800/60 hover:bg-slate-800 text-slate-400 hover:text-white transition-colors"
             >
               <X className="w-4 h-4" />
             </button>
           </div>
         </div>
+
+        {downloadError && (
+          <div
+            role="alert"
+            className="mx-6 mt-3 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs"
+          >
+            {downloadError}
+          </div>
+        )}
 
         {/* Modal Body: Multi-Format Viewer + Side Security Panel */}
         <div className="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-3 divide-y lg:divide-y-0 lg:divide-x divide-slate-800">

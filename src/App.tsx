@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { 
   INITIAL_USERS, 
   INITIAL_TENANTS, 
@@ -42,16 +42,17 @@ import { MoveModal } from './components/MoveModal';
 import { PublicShareModal } from './components/PublicShareModal';
 import { NotificationsModal } from './components/NotificationsModal';
 import { BillingCheckoutModal } from './components/BillingCheckoutModal';
+import { ConfirmActionModal } from './components/ConfirmActionModal';
+import { RenameModal } from './components/RenameModal';
+import { apiClient, ApiDocument, ApiError, ApiFolder } from './services/api';
 import { 
   FileText, 
   Folder as FolderIcon, 
   HardDrive, 
   ShieldCheck, 
-  Clock, 
-  Star, 
-  UploadCloud, 
-  Search,
-  CheckCircle2
+  AlertTriangle,
+  CheckCircle2,
+  X
 } from 'lucide-react';
 import { formatBytes } from './services/crypto';
 
@@ -99,6 +100,106 @@ export default function App() {
     isOpen: boolean;
     targetPlan: Plan | null;
   }>({ isOpen: false, targetPlan: null });
+
+  // API session, feedback & accessible confirmation/rename modal states
+  const [isApiSession, setIsApiSession] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
+  const [feedbackBanner, setFeedbackBanner] = useState<{
+    type: 'success' | 'error' | 'warning' | 'info';
+    text: string;
+  } | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    description: string;
+    confirmLabel: string;
+    variant: 'danger' | 'warning';
+    onConfirm: () => void;
+  } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<DocumentItem | null>(null);
+
+  const showFeedback = useCallback(
+    (type: 'success' | 'error' | 'warning' | 'info', text: string) => {
+      setFeedbackBanner({ type, text });
+    },
+    []
+  );
+
+  const mapApiDoc = (d: ApiDocument): DocumentItem => ({
+    id: d.id,
+    tenantId: d.tenant_id,
+    folderId: d.folder_id,
+    originalName: d.original_name,
+    storageKey: d.storage_key,
+    mimeType: d.mime_type,
+    extension: d.extension,
+    sizeBytes: d.size_bytes,
+    sha256Hash: d.sha256_hash,
+    status: (d.status as DocumentItem['status']) || 'READY',
+    antivirusStatus: (d.antivirus_status as DocumentItem['antivirusStatus']) || 'CLEAN',
+    isFavorite: d.is_favorite,
+    isTrashed: d.is_trashed,
+    trashedAt: d.trashed_at || undefined,
+    createdBy: d.created_by,
+    createdAt: d.created_at,
+    updatedAt: d.updated_at,
+    versions: [],
+  });
+
+  const mapApiFolder = (f: ApiFolder): Folder => ({
+    id: f.id,
+    tenantId: f.tenant_id,
+    parentId: f.parent_id,
+    name: f.name,
+    color: f.color,
+    isFavorite: f.is_favorite,
+    isTrashed: f.is_trashed,
+    createdBy: f.created_by,
+    createdAt: f.created_at,
+    updatedAt: f.updated_at,
+  });
+
+  const syncWorkspaceFromApi = useCallback(async (tenantId: string) => {
+    try {
+      const [apiFolders, apiDocs, apiTrashedDocs, apiQuota] = await Promise.all([
+        apiClient.documents.listFolders(tenantId, { limit: 200 }),
+        apiClient.documents.list(tenantId, { trashed: false, limit: 200 }),
+        apiClient.documents.list(tenantId, { trashed: true, limit: 200 }),
+        apiClient.tenants.quota(tenantId),
+      ]);
+      setFolders(apiFolders.map(mapApiFolder));
+      setDocuments([...apiDocs, ...apiTrashedDocs].map(mapApiDoc));
+      setTenants((prev) =>
+        prev.map((t) =>
+          t.id === tenantId
+            ? {
+                ...t,
+                usedBytes: apiQuota.used_bytes,
+                reservedBytes: apiQuota.reserved_bytes,
+                documentCount: apiQuota.document_count,
+              }
+            : t
+        )
+      );
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status !== 401) {
+        showFeedback('error', err.detail);
+      }
+    }
+  }, [showFeedback]);
+
+  useEffect(() => {
+    apiClient.setUnauthorizedHandler(() => {
+      setIsApiSession(false);
+      setAuthError('Votre session a expiré. Veuillez vous reconnecter.');
+      showFeedback('warning', 'Session expirée : veuillez vous reconnecter pour continuer.');
+      setIsAuthOpen(true);
+    });
+    return () => {
+      apiClient.setUnauthorizedHandler(null);
+    };
+  }, [showFeedback]);
 
   // Resolved active tenant & plan
   const currentTenant = useMemo(() => {
@@ -307,6 +408,11 @@ export default function App() {
       }
       return d;
     }));
+    if (isApiSession) {
+      apiClient.documents.trash(currentTenant.id, docId).catch((err: unknown) => {
+        showFeedback('error', err instanceof Error ? err.message : 'Erreur lors de la mise en corbeille.');
+      });
+    }
     logAction('DOC_TRASH', 'DOCUMENT', docId, 'Fichier déplacé vers la corbeille');
   };
 
@@ -317,38 +423,74 @@ export default function App() {
       }
       return d;
     }));
+    if (isApiSession) {
+      apiClient.documents.restore(currentTenant.id, docId).catch((err: unknown) => {
+        showFeedback('error', err instanceof Error ? err.message : 'Erreur lors de la restauration.');
+      });
+    }
     logAction('DOC_RESTORE', 'DOCUMENT', docId, 'Fichier restauré de la corbeille');
+  };
+
+  const executePurgeDoc = (docId: string) => {
+    const docToDelete = documents.find(d => d.id === docId);
+    if (!docToDelete) return;
+    setDocuments(prev => prev.filter(d => d.id !== docId));
+    setTenants(prev => prev.map(t => {
+      if (t.id === docToDelete.tenantId) {
+        return {
+          ...t,
+          usedBytes: Math.max(0, (t.usedBytes || 0) - docToDelete.sizeBytes),
+          documentCount: Math.max(0, (t.documentCount || 0) - 1)
+        };
+      }
+      return t;
+    }));
+    if (isApiSession) {
+      apiClient.documents.purge(currentTenant.id, docId).catch((err: unknown) => {
+        showFeedback('error', err instanceof Error ? err.message : 'Erreur lors de la suppression définitive.');
+      });
+    }
+    logAction('DOC_PERMANENT_PURGE', 'DOCUMENT', docToDelete.originalName, 'Fichier définitivement purgé du stockage MinIO');
+    showFeedback('success', `"${docToDelete.originalName}" a été définitivement supprimé.`);
   };
 
   const handlePurgeDoc = (docId: string) => {
     const docToDelete = documents.find(d => d.id === docId);
-    if (docToDelete) {
-      setDocuments(prev => prev.filter(d => d.id !== docId));
-      // Reclaim tenant storage quota
-      setTenants(prev => prev.map(t => {
-        if (t.id === docToDelete.tenantId) {
-          return {
-            ...t,
-            usedBytes: Math.max(0, (t.usedBytes || 0) - docToDelete.sizeBytes),
-            documentCount: Math.max(0, (t.documentCount || 0) - 1)
-          };
-        }
-        return t;
-      }));
-      logAction('DOC_PERMANENT_PURGE', 'DOCUMENT', docToDelete.originalName, 'Fichier définitivement purgé du stockage MinIO');
-    }
+    if (!docToDelete) return;
+    setConfirmModal({
+      isOpen: true,
+      title: 'Suppression définitive du document',
+      description: `Voulez-vous supprimer définitivement "${docToDelete.originalName}" ? L'objet sera effacé de MinIO S3 et cette action est irréversible.`,
+      confirmLabel: 'Supprimer définitivement',
+      variant: 'danger',
+      onConfirm: () => {
+        executePurgeDoc(docId);
+        setConfirmModal(null);
+      },
+    });
   };
 
   const handleRenameDoc = (doc: DocumentItem) => {
-    const newName = window.prompt('Nouveau nom du document :', doc.originalName);
-    if (!newName || !newName.trim()) return;
+    setRenameTarget(doc);
+  };
+
+  const handleConfirmRename = (newName: string) => {
+    if (!renameTarget) return;
+    const docId = renameTarget.id;
     setDocuments(prev => prev.map(d => {
-      if (d.id === doc.id) {
-        return { ...d, originalName: newName.trim(), updatedAt: new Date().toISOString() };
+      if (d.id === docId) {
+        return { ...d, originalName: newName, updatedAt: new Date().toISOString() };
       }
       return d;
     }));
-    logAction('DOC_RENAME', 'DOCUMENT', newName.trim(), `Fichier renommé`);
+    if (isApiSession) {
+      apiClient.documents.rename(currentTenant.id, docId, newName).catch((err: unknown) => {
+        showFeedback('error', err instanceof Error ? err.message : 'Erreur lors du renommage.');
+      });
+    }
+    logAction('DOC_RENAME', 'DOCUMENT', newName, `Fichier renommé`);
+    setRenameTarget(null);
+    showFeedback('success', `Document renommé en "${newName}".`);
   };
 
   const handleTrashFolder = (folderId: string) => {
@@ -358,6 +500,11 @@ export default function App() {
       }
       return f;
     }));
+    if (isApiSession) {
+      apiClient.documents.deleteFolder(currentTenant.id, folderId).catch((err: unknown) => {
+        showFeedback('error', err instanceof Error ? err.message : 'Erreur lors de la suppression du dossier.');
+      });
+    }
   };
 
   // --- Folder & Document Advanced Operations (Phase 3) ---
@@ -489,24 +636,38 @@ export default function App() {
   };
 
   const handleBulkPurge = (docIds: string[]) => {
-    const docsToPurge = documents.filter(d => docIds.includes(d.id));
-    const totalBytesFreed = docsToPurge.reduce((acc, curr) => acc + curr.sizeBytes, 0);
+    if (docIds.length === 0) return;
+    setConfirmModal({
+      isOpen: true,
+      title: 'Purge définitive groupée',
+      description: `Vous allez supprimer définitivement ${docIds.length} fichier(s) du stockage MinIO S3. Cette opération est irréversible.`,
+      confirmLabel: 'Purger la sélection',
+      variant: 'danger',
+      onConfirm: () => {
+        const docsToPurge = documents.filter(d => docIds.includes(d.id));
+        const totalBytesFreed = docsToPurge.reduce((acc, curr) => acc + curr.sizeBytes, 0);
 
-    setDocuments(prev => prev.filter(d => !docIds.includes(d.id)));
-
-    // Reclaim storage
-    setTenants(prev => prev.map(t => {
-      if (t.id === currentTenant.id) {
-        return {
-          ...t,
-          usedBytes: Math.max(0, (t.usedBytes || 0) - totalBytesFreed),
-          documentCount: Math.max(0, (t.documentCount || 0) - docsToPurge.length)
-        };
-      }
-      return t;
-    }));
-
-    logAction('BULK_DOC_PURGE', 'DOCUMENT', `${docIds.length} fichiers`, `Purge définitive (${formatBytes(totalBytesFreed)} libérés)`);
+        setDocuments(prev => prev.filter(d => !docIds.includes(d.id)));
+        setTenants(prev => prev.map(t => {
+          if (t.id === currentTenant.id) {
+            return {
+              ...t,
+              usedBytes: Math.max(0, (t.usedBytes || 0) - totalBytesFreed),
+              documentCount: Math.max(0, (t.documentCount || 0) - docsToPurge.length)
+            };
+          }
+          return t;
+        }));
+        if (isApiSession) {
+          Promise.all(docIds.map((id) => apiClient.documents.purge(currentTenant.id, id))).catch((err: unknown) => {
+            showFeedback('error', err instanceof Error ? err.message : 'Erreur lors de la purge groupée.');
+          });
+        }
+        logAction('BULK_DOC_PURGE', 'DOCUMENT', `${docIds.length} fichiers`, `Purge définitive (${formatBytes(totalBytesFreed)} libérés)`);
+        showFeedback('success', `${docsToPurge.length} fichier(s) purgé(s) (${formatBytes(totalBytesFreed)} libérés).`);
+        setConfirmModal(null);
+      },
+    });
   };
 
   // --- Secure Sharing Handlers (Phase 5) ---
@@ -642,29 +803,37 @@ export default function App() {
     const trashedFlds = tenantFolders.filter(f => f.isTrashed);
     if (trashedDocs.length === 0 && trashedFlds.length === 0) return;
 
-    if (!window.confirm(`Êtes-vous sûr de vouloir vider la corbeille ? ${trashedDocs.length} fichier(s) et ${trashedFlds.length} dossier(s) seront définitivement purgés.`)) {
-      return;
-    }
+    setConfirmModal({
+      isOpen: true,
+      title: 'Vider définitivement la corbeille',
+      description: `${trashedDocs.length} fichier(s) et ${trashedFlds.length} dossier(s) seront définitivement purgés de la base PostgreSQL et du stockage MinIO S3.`,
+      confirmLabel: 'Vider la corbeille',
+      variant: 'danger',
+      onConfirm: () => {
+        const totalBytesFreed = trashedDocs.reduce((acc, curr) => acc + curr.sizeBytes, 0);
 
-    const totalBytesFreed = trashedDocs.reduce((acc, curr) => acc + curr.sizeBytes, 0);
-
-    // Remove trashed documents & folders
-    setDocuments(prev => prev.filter(d => !(d.tenantId === currentTenant.id && d.isTrashed)));
-    setFolders(prev => prev.filter(f => !(f.tenantId === currentTenant.id && f.isTrashed)));
-
-    // Reclaim storage quota
-    setTenants(prev => prev.map(t => {
-      if (t.id === currentTenant.id) {
-        return {
-          ...t,
-          usedBytes: Math.max(0, (t.usedBytes || 0) - totalBytesFreed),
-          documentCount: Math.max(0, (t.documentCount || 0) - trashedDocs.length)
-        };
-      }
-      return t;
-    }));
-
-    logAction('TRASH_EMPTY', 'TENANT', currentTenant.name, `Corbeille entièrement vidée (${formatBytes(totalBytesFreed)} libérés)`);
+        setDocuments(prev => prev.filter(d => !(d.tenantId === currentTenant.id && d.isTrashed)));
+        setFolders(prev => prev.filter(f => !(f.tenantId === currentTenant.id && f.isTrashed)));
+        setTenants(prev => prev.map(t => {
+          if (t.id === currentTenant.id) {
+            return {
+              ...t,
+              usedBytes: Math.max(0, (t.usedBytes || 0) - totalBytesFreed),
+              documentCount: Math.max(0, (t.documentCount || 0) - trashedDocs.length)
+            };
+          }
+          return t;
+        }));
+        if (isApiSession) {
+          apiClient.documents.emptyTrash(currentTenant.id).catch((err: unknown) => {
+            showFeedback('error', err instanceof Error ? err.message : 'Erreur lors du vidage de la corbeille.');
+          });
+        }
+        logAction('TRASH_EMPTY', 'TENANT', currentTenant.name, `Corbeille entièrement vidée (${formatBytes(totalBytesFreed)} libérés)`);
+        showFeedback('success', `Corbeille vidée : ${formatBytes(totalBytesFreed)} libérés.`);
+        setConfirmModal(null);
+      },
+    });
   };
 
   const handleOpenUpgradeModal = (planId: PlanType) => {
@@ -760,7 +929,55 @@ export default function App() {
     logAction('ADMIN_TENANT_PLAN_OVERRIDE', 'TENANT', tenantId, `Forfait forcé vers ${planId} par l'administrateur`);
   };
 
-  const handleRegister = (fullName: string, email: string) => {
+  const handleRegister = async (fullName: string, email: string, password?: string) => {
+    setAuthError(null);
+    if (password && password.length >= 8) {
+      setIsAuthSubmitting(true);
+      try {
+        await apiClient.auth.register(fullName, email, password);
+        const tokenRes = await apiClient.auth.login(email, password);
+        const apiTenants = await apiClient.tenants.list();
+        const me = await apiClient.auth.me();
+        setIsApiSession(true);
+        const mappedUser: User = {
+          id: me.id,
+          email: me.email,
+          fullName: me.full_name,
+          isActive: me.is_active,
+          isVerified: me.is_verified,
+          isSuperuser: me.is_superuser,
+          createdAt: me.created_at,
+        };
+        const mappedTenants: Tenant[] = apiTenants.map((t) => ({
+          id: t.id,
+          name: t.name,
+          ownerId: t.owner_id,
+          planId: (t.plan_id as PlanType) || 'FREE',
+          role: (t.role as Tenant['role']) || 'OWNER',
+          isActive: t.is_active,
+          createdAt: t.created_at || new Date().toISOString(),
+          usedBytes: t.used_bytes || 0,
+          reservedBytes: t.reserved_bytes || 0,
+          documentCount: t.document_count || 0,
+        }));
+        setUsers((prev) => [mappedUser, ...prev.filter((u) => u.id !== mappedUser.id)]);
+        setTenants(mappedTenants);
+        setCurrentUser(mappedUser);
+        setCurrentTenantId(tokenRes.tenant_id);
+        setIsAuthOpen(false);
+        await syncWorkspaceFromApi(tokenRes.tenant_id);
+        showFeedback('success', `Compte et espace personnel créés pour ${mappedUser.fullName}.`);
+        return;
+      } catch (err: unknown) {
+        if (err instanceof ApiError && err.status >= 400 && err.status < 500 && err.status !== 404) {
+          setAuthError(err.detail);
+          return;
+        }
+      } finally {
+        setIsAuthSubmitting(false);
+      }
+    }
+
     const newUser: User = {
       id: `usr-${crypto.randomUUID()}`,
       email: email.toLowerCase(),
@@ -771,7 +988,6 @@ export default function App() {
       createdAt: new Date().toISOString()
     };
 
-    // Auto-create personal tenant
     const newTenant: Tenant = {
       id: `tnt-${crypto.randomUUID()}`,
       name: `Espace de ${fullName}`,
@@ -791,18 +1007,68 @@ export default function App() {
     setCurrentTenantId(newTenant.id);
     setIsAuthOpen(false);
     logAction('AUTH_REGISTER', 'USER', email, `Création du compte et initialisation de l'espace personnel.`);
+    showFeedback('success', `Espace personnel initialisé pour ${fullName}.`);
   };
 
-  const handleLogin = (email: string) => {
+  const handleLogin = async (email: string, password?: string) => {
+    setAuthError(null);
+    if (password && password !== '••••••••••••') {
+      setIsAuthSubmitting(true);
+      try {
+        const tokenRes = await apiClient.auth.login(email, password);
+        const [me, apiTenants] = await Promise.all([apiClient.auth.me(), apiClient.tenants.list()]);
+        setIsApiSession(true);
+        const mappedUser: User = {
+          id: me.id,
+          email: me.email,
+          fullName: me.full_name,
+          isActive: me.is_active,
+          isVerified: me.is_verified,
+          isSuperuser: me.is_superuser,
+          createdAt: me.created_at,
+        };
+        const mappedTenants: Tenant[] = apiTenants.map((t) => ({
+          id: t.id,
+          name: t.name,
+          ownerId: t.owner_id,
+          planId: (t.plan_id as PlanType) || 'FREE',
+          role: (t.role as Tenant['role']) || 'OWNER',
+          isActive: t.is_active,
+          createdAt: t.created_at || new Date().toISOString(),
+          usedBytes: t.used_bytes || 0,
+          reservedBytes: t.reserved_bytes || 0,
+          documentCount: t.document_count || 0,
+        }));
+        setCurrentUser(mappedUser);
+        if (mappedTenants.length > 0) {
+          setTenants(mappedTenants);
+          setCurrentTenantId(tokenRes.tenant_id || mappedTenants[0].id);
+          await syncWorkspaceFromApi(tokenRes.tenant_id || mappedTenants[0].id);
+        }
+        setIsAuthOpen(false);
+        showFeedback('success', `Connexion réussie en tant que ${mappedUser.fullName}.`);
+        return;
+      } catch (err: unknown) {
+        if (err instanceof ApiError && err.status >= 400 && err.status < 500 && err.status !== 404) {
+          setAuthError(err.detail);
+          return;
+        }
+      } finally {
+        setIsAuthSubmitting(false);
+      }
+    }
+
     const user = users.find(u => u.email.toLowerCase() === email.toLowerCase());
     if (user) {
+      setIsApiSession(false);
       setCurrentUser(user);
       const userTenant = tenants.find(t => t.ownerId === user.id) || tenants[0];
       setCurrentTenantId(userTenant.id);
       setIsAuthOpen(false);
       logAction('AUTH_LOGIN', 'USER', email, `Connexion réussie.`);
+      showFeedback('success', `Connecté en tant que ${user.fullName}.`);
     } else {
-      alert("Identifiants non reconnus. Veuillez vérifier l'adresse saisie.");
+      setAuthError("Identifiants non reconnus. Veuillez vérifier l'adresse saisie.");
     }
   };
 
@@ -823,11 +1089,20 @@ export default function App() {
     setAuditLogs(prev => [log, ...prev]);
   };
 
-  const handleDeleteAccount = () => {
+  const handleDeleteAccount = async () => {
     const userId = currentUser.id;
     const userEmail = currentUser.email;
 
-    // Purge user's documents & folders
+    if (isApiSession) {
+      try {
+        await apiClient.gdpr.deleteAccount();
+        setIsApiSession(false);
+      } catch (err: unknown) {
+        showFeedback('error', err instanceof Error ? err.message : 'Erreur lors de la suppression RGPD du compte.');
+        return;
+      }
+    }
+
     setDocuments(prev => prev.filter(d => d.tenantId !== currentTenant.id && d.createdBy !== userId));
     setFolders(prev => prev.filter(f => f.tenantId !== currentTenant.id && f.createdBy !== userId));
     setShares(prev => prev.filter(s => s.createdBy !== userId));
@@ -835,8 +1110,7 @@ export default function App() {
     setUsers(prev => prev.filter(u => u.id !== userId));
 
     logAction('GDPR_ACCOUNT_PURGE_SUCCESS', 'AUTH', userEmail, 'Compte et données intégralement purgés (RGPD Art. 17)');
-
-    alert(`Votre compte (${userEmail}) ainsi que tous vos espaces et documents ont été définitivement purgés conformément à l'article 17 du RGPD.`);
+    showFeedback('success', `Le compte (${userEmail}) et toutes ses données ont été purgés conformément à l'article 17 du RGPD.`);
 
     const remainingUsers = users.filter(u => u.id !== userId);
     if (remainingUsers.length > 0) {
@@ -846,6 +1120,13 @@ export default function App() {
     } else {
       setIsAuthOpen(true);
     }
+  };
+
+  const denyReadOnlyAction = () => {
+    showFeedback(
+      'warning',
+      'Action refusée : votre rôle est LECTEUR seul dans cet espace documentaire (politique RBAC appliquée).'
+    );
   };
 
   return (
@@ -863,7 +1144,7 @@ export default function App() {
         onOpenArchitecture={() => setIsArchitectureOpen(true)}
         onOpenUpload={() => {
           if (currentTenant.role === 'VIEWER' || currentTenant.role === 'GUEST') {
-            alert("Action refusée : votre rôle est LECTEUR seul dans cet espace documentaire (politique RBAC appliquée).");
+            denyReadOnlyAction();
             return;
           }
           setIsUploadOpen(true);
@@ -872,9 +1153,49 @@ export default function App() {
         onOpenMembers={() => setIsMembersOpen(true)}
         onOpenNotifications={() => setIsNotificationsOpen(true)}
         unreadNotificationsCount={notifications.filter(n => !n.isRead).length}
-        onLogout={() => setIsAuthOpen(true)}
+        onLogout={() => {
+          if (isApiSession) {
+            apiClient.auth.logout().catch(() => undefined);
+            setIsApiSession(false);
+          }
+          setAuthError(null);
+          setIsAuthOpen(true);
+        }}
         allUsers={users}
       />
+
+      {/* Accessible Global Feedback Banner */}
+      {feedbackBanner && (
+        <div
+          role={feedbackBanner.type === 'error' || feedbackBanner.type === 'warning' ? 'alert' : 'status'}
+          className={`mx-6 mt-3 px-4 py-2.5 rounded-xl border text-xs flex items-center justify-between gap-3 ${
+            feedbackBanner.type === 'error'
+              ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
+              : feedbackBanner.type === 'warning'
+                ? 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+                : feedbackBanner.type === 'success'
+                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+                  : 'bg-blue-500/10 border-blue-500/30 text-blue-200'
+          }`}
+        >
+          <div className="flex items-center space-x-2">
+            {feedbackBanner.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+            )}
+            <span>{feedbackBanner.text}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFeedbackBanner(null)}
+            aria-label="Fermer la notification"
+            className="p-1 rounded-lg hover:bg-slate-800/70 text-current"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Main Container */}
       <div className="flex-1 flex overflow-hidden">
@@ -891,14 +1212,14 @@ export default function App() {
           currentPlan={currentPlan}
           onOpenUpload={() => {
             if (currentTenant.role === 'VIEWER' || currentTenant.role === 'GUEST') {
-              alert("Action refusée : votre rôle est LECTEUR seul dans cet espace documentaire (politique RBAC appliquée).");
+              denyReadOnlyAction();
               return;
             }
             setIsUploadOpen(true);
           }}
           onOpenNewFolder={() => {
             if (currentTenant.role === 'VIEWER' || currentTenant.role === 'GUEST') {
-              alert("Action refusée : votre rôle est LECTEUR seul dans cet espace documentaire (politique RBAC appliquée).");
+              denyReadOnlyAction();
               return;
             }
             setFolderModal({ isOpen: true, folderToEdit: null, parentFolder: currentFolder });
@@ -997,14 +1318,14 @@ export default function App() {
               onCopyDocument={handleCopyDocument}
               onOpenUpload={() => {
                 if (currentTenant.role === 'VIEWER' || currentTenant.role === 'GUEST') {
-                  alert("Action refusée : votre rôle est LECTEUR seul dans cet espace documentaire (politique RBAC appliquée).");
+                  denyReadOnlyAction();
                   return;
                 }
                 setIsUploadOpen(true);
               }}
               onOpenNewFolder={() => {
                 if (currentTenant.role === 'VIEWER' || currentTenant.role === 'GUEST') {
-                  alert("Action refusée : votre rôle est LECTEUR seul dans cet espace documentaire (politique RBAC appliquée).");
+                  denyReadOnlyAction();
                   return;
                 }
                 setFolderModal({ isOpen: true, folderToEdit: null, parentFolder: currentFolder });
@@ -1017,6 +1338,9 @@ export default function App() {
               onBulkTrash={handleBulkTrash}
               onBulkRestore={handleBulkRestore}
               onBulkPurge={handleBulkPurge}
+              onBulkDownload={(docIds) =>
+                showFeedback('info', `Préparation du téléchargement groupé pour ${docIds.length} fichier(s).`)
+              }
               onEmptyTrash={handleEmptyTrash}
               isTrashView={currentTab === 'trash'}
               userRole={currentTenant.role}
@@ -1033,6 +1357,19 @@ export default function App() {
         currentPlan={currentPlan}
         currentFolder={currentFolder}
         onUploadSuccess={handleUploadSuccess}
+        onUploadToApi={
+          isApiSession
+            ? async (file, folderId, onProgress) => {
+                const uploaded = await apiClient.storage.uploadWithProgress(
+                  currentTenant.id,
+                  file,
+                  folderId,
+                  onProgress
+                );
+                return mapApiDoc(uploaded);
+              }
+            : undefined
+        }
       />
 
       <FilePreviewModal
@@ -1042,6 +1379,14 @@ export default function App() {
           setPreviewDoc(null);
           setShareDoc(doc);
         }}
+        onRequestDownload={
+          isApiSession
+            ? async (doc) => {
+                const res = await apiClient.storage.getDownloadUrl(currentTenant.id, doc.id);
+                return res.download_url;
+              }
+            : undefined
+        }
       />
 
       <ShareModal
@@ -1090,6 +1435,8 @@ export default function App() {
         onLogin={handleLogin}
         onRegister={handleRegister}
         availableUsers={users}
+        errorMessage={authError}
+        isSubmitting={isAuthSubmitting}
       />
 
       <SecuritySimulatorModal
@@ -1143,6 +1490,23 @@ export default function App() {
         currentTenant={currentTenant}
         invoices={invoices}
         onConfirmUpgrade={handleConfirmUpgrade}
+      />
+
+      <ConfirmActionModal
+        isOpen={Boolean(confirmModal?.isOpen)}
+        title={confirmModal?.title || ''}
+        description={confirmModal?.description || ''}
+        confirmLabel={confirmModal?.confirmLabel}
+        variant={confirmModal?.variant}
+        onConfirm={() => confirmModal?.onConfirm()}
+        onCancel={() => setConfirmModal(null)}
+      />
+
+      <RenameModal
+        isOpen={renameTarget !== null}
+        currentName={renameTarget?.originalName || ''}
+        onConfirm={handleConfirmRename}
+        onCancel={() => setRenameTarget(null)}
       />
     </div>
   );

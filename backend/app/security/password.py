@@ -83,48 +83,25 @@ def hash_share_token(token: str) -> str:
     """
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
-class RateLimiter:
+from backend.app.core.rate_limit import SlidingRateLimiter
+
+
+class RateLimiter(SlidingRateLimiter):
     """
-    In-memory rate limiter to protect public share links against password brute-forcing.
+    Distributed Redis-backed rate limiter (with resilient offline test fallback)
+    to protect public share links against password brute-forcing.
     Locks after 5 consecutive failed attempts for 15 minutes.
     """
 
-    def __init__(self, max_attempts: int = 5, lock_duration_seconds: int = 900):
-        self.max_attempts = max_attempts
+    def __init__(self, max_attempts: int = 5, lock_duration_seconds: int = 900, redis_url: str | None = None):
+        super().__init__(
+            namespace="share",
+            max_attempts=max_attempts,
+            window_seconds=lock_duration_seconds,
+            redis_url=redis_url,
+        )
         self.lock_duration = lock_duration_seconds
-        # key: identifier -> (attempts_count, last_attempt_time)
-        self._attempts: Dict[str, Tuple[int, float]] = {}
 
-    def is_rate_limited(self, identifier: str) -> bool:
-        """Returns True if the identifier is currently blocked."""
-        if identifier not in self._attempts:
-            return False
-        count, last_time = self._attempts[identifier]
-        now = time.time()
-        if now - last_time > self.lock_duration:
-            # Expired lock window
-            del self._attempts[identifier]
-            return False
-        return count >= self.max_attempts
-
-    def record_failed_attempt(self, identifier: str) -> int:
-        """Records a failed password verification attempt."""
-        now = time.time()
-        if identifier in self._attempts:
-            count, last_time = self._attempts[identifier]
-            if now - last_time > self.lock_duration:
-                count = 0
-            new_count = count + 1
-            self._attempts[identifier] = (new_count, now)
-            return new_count
-        else:
-            self._attempts[identifier] = (1, now)
-            return 1
-
-    def reset_attempts(self, identifier: str):
-        """Clears failed attempts upon successful password verification."""
-        if identifier in self._attempts:
-            del self._attempts[identifier]
 
 # Global rate limiter for share password access
 share_rate_limiter = RateLimiter(max_attempts=5, lock_duration_seconds=900)

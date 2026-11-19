@@ -20,9 +20,20 @@ PROHIBITED_MIME_TYPES = {
 }
 
 def is_prohibited_extension(filename: str) -> bool:
-    """Returns True if the file extension is dangerous / executable."""
-    _, ext = os.path.splitext(filename.lower())
-    return ext in PROHIBITED_EXTENSIONS
+    """Returns True if the file extension (or any intermediate extension) is dangerous / executable."""
+    base = os.path.basename((filename or "").strip()).lower()
+    if not base:
+        return False
+    _, ext = os.path.splitext(base)
+    if ext in PROHIBITED_EXTENSIONS:
+        return True
+    # Block dangerous double-extension masquerading (e.g. invoice.exe.pdf, run.sh.txt)
+    parts = [p for p in base.split(".") if p]
+    if len(parts) > 2:
+        for segment in parts[1:-1]:
+            if f".{segment}" in PROHIBITED_EXTENSIONS:
+                return True
+    return False
 
 def is_prohibited_mime_type(mime_type: str) -> bool:
     """Returns True if the MIME type is an executable / dangerous type."""
@@ -63,6 +74,11 @@ class StorageBackend(abc.ABC):
     @abc.abstractmethod
     def get_object(self, storage_key: str) -> bytes:
         """Retrieve object binary payload."""
+        pass
+
+    @abc.abstractmethod
+    def copy_object(self, source_key: str, dest_key: str) -> bool:
+        """Copy an existing object to a new storage key."""
         pass
 
     @abc.abstractmethod

@@ -1,5 +1,5 @@
 import uuid
-from typing import List, Optional, Tuple
+from typing import Annotated, List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +26,7 @@ from backend.app.models.audit import AuditLog
 from backend.app.schemas.share import (
     InternalShareCreate,
     SecureLinkCreate,
+    ShareUpdate,
     ShareRead,
     ShareRecipientRead,
     PublicShareAccessRequest,
@@ -209,6 +210,8 @@ async def list_tenant_shares(
     document_id: Optional[uuid.UUID] = Query(None),
     folder_id: Optional[uuid.UUID] = Query(None),
     active_only: bool = Query(False),
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
     context: TenantContext = Depends(require_permission(Permission.DOCUMENT_READ)),
     db: AsyncSession = Depends(get_db),
 ):
@@ -228,7 +231,7 @@ async def list_tenant_shares(
     if active_only:
         stmt = stmt.where(Share.is_active == True)
 
-    stmt = stmt.order_by(Share.created_at.desc())
+    stmt = stmt.order_by(Share.created_at.desc()).limit(limit).offset(offset)
     res = await db.execute(stmt)
     shares = res.scalars().all()
 
@@ -521,6 +524,123 @@ async def create_secure_link(
     )
 
 
+@router.patch("/{share_id}", response_model=ShareRead)
+async def update_share(
+    share_id: uuid.UUID,
+    req: ShareUpdate,
+    request: Request,
+    context: TenantContext = Depends(require_permission(Permission.DOCUMENT_SHARE)),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Met à jour les paramètres d'un partage existant dans PostgreSQL
+    (rôle, mot de passe, quota de téléchargements, expiration, statut actif).
+    Seul le créateur du partage ou le propriétaire (OWNER) du tenant peut modifier.
+    """
+    share_res = await db.execute(
+        select(Share)
+        .options(selectinload(Share.recipients))
+        .where(
+            Share.id == share_id,
+            Share.tenant_id == context.tenant_id,
+        )
+        .with_for_update()
+    )
+    share = share_res.scalar_one_or_none()
+
+    if not share:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Partage introuvable ou n'appartenant pas à cet espace documentaire.",
+        )
+
+    is_owner = context.role == "OWNER" or context.user.is_superuser
+    is_creator = share.created_by == context.user_id
+    if not is_owner and not is_creator:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Droits insuffisants : seul le créateur du partage ou le propriétaire de l'espace peut le modifier.",
+        )
+
+    now = datetime.now(timezone.utc)
+
+    if req.role is not None:
+        normalized_role = req.role.upper().strip()
+        if normalized_role not in ALLOWED_SHARE_ROLES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Rôle de partage invalide '{req.role}'. Rôles autorisés : VIEWER, EDITOR, GUEST.",
+            )
+        share.role = normalized_role
+        for rec in (share.recipients or []):
+            rec.role = normalized_role
+
+    if req.clear_password:
+        share.password_hash = None
+    elif req.password is not None:
+        if share.share_type != "SECURE_LINK":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Seuls les liens de partage publics peuvent être protégés par mot de passe.",
+            )
+        share.password_hash = hash_password(req.password)
+
+    if req.clear_max_downloads:
+        share.max_downloads = None
+    elif req.max_downloads is not None:
+        share.max_downloads = req.max_downloads
+
+    if req.clear_expiration:
+        share.expires_at = None
+    elif req.expires_in_hours is not None:
+        share.expires_at = now + timedelta(hours=req.expires_in_hours)
+
+    if req.is_active is not None:
+        share.is_active = req.is_active
+
+    share.updated_at = now
+
+    target_name = "Ressource"
+    if share.document_id:
+        d_res = await db.execute(
+            select(Document.original_name).where(
+                Document.id == share.document_id,
+                Document.tenant_id == context.tenant_id,
+            )
+        )
+        name_val = d_res.scalar_one_or_none()
+        if name_val:
+            target_name = name_val
+    elif share.folder_id:
+        f_res = await db.execute(
+            select(Folder.name).where(
+                Folder.id == share.folder_id,
+                Folder.tenant_id == context.tenant_id,
+            )
+        )
+        name_val = f_res.scalar_one_or_none()
+        if name_val:
+            target_name = name_val
+
+    client_ip, user_agent = _extract_client_meta(request)
+    audit_entry = _build_audit_log(
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        user_email=context.user.email,
+        action="SHARE_UPDATED",
+        resource_type="SHARE",
+        resource_id=share.id,
+        resource_name=target_name,
+        ip_address=client_ip,
+        user_agent=user_agent,
+        details=f"Paramètres du partage modifiés (rôle={share.role}, actif={share.is_active})",
+    )
+    db.add(audit_entry)
+    await _commit_or_fail(db, "Mise à jour du partage")
+
+    return _share_to_read(share, target_name=target_name, raw_token=None)
+
+
 @router.delete("/{share_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def revoke_share(
     share_id: uuid.UUID,
@@ -582,6 +702,8 @@ async def revoke_share(
 
 @router.get("/received", response_model=List[ShareRead])
 async def list_received_shares(
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -605,6 +727,8 @@ async def list_received_shares(
             ),
         )
         .order_by(Share.created_at.desc())
+        .limit(limit)
+        .offset(offset)
     )
     res = await db.execute(stmt)
     shares = res.scalars().unique().all()

@@ -27,6 +27,17 @@ class SecureLinkCreate(BaseModel):
     max_downloads: Optional[int] = Field(None, ge=1)
     role: str = "VIEWER"
 
+
+class ShareUpdate(BaseModel):
+    role: Optional[str] = None
+    password: Optional[str] = Field(None, min_length=4, max_length=128)
+    clear_password: bool = False
+    max_downloads: Optional[int] = Field(None, ge=1)
+    clear_max_downloads: bool = False
+    expires_in_hours: Optional[int] = Field(None, ge=1, le=8760)
+    clear_expiration: bool = False
+    is_active: Optional[bool] = None
+
 class ShareRead(BaseModel):
     id: UUID
     tenant_id: UUID

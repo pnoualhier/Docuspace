@@ -6,7 +6,12 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from jose import JWTError
-from backend.app.core.database import get_db, set_tenant_context, reset_tenant_context
+from backend.app.core.database import (
+    get_db,
+    set_tenant_context,
+    set_user_recipient_context,
+    reset_tenant_context,
+)
 from backend.app.core.security import decode_token
 from backend.app.models.user import User
 from backend.app.models.tenant import Tenant, TenantMember
@@ -163,8 +168,9 @@ async def get_current_tenant_context(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aucun espace documentaire trouvé pour ce compte")
         role = "OWNER"
 
-    # Enforce PostgreSQL Row-Level Security
+    # Enforce PostgreSQL Row-Level Security (tenant + authenticated user)
     await set_tenant_context(db, str(tenant.id), is_superuser=current_user.is_superuser)
+    await set_user_recipient_context(db, str(current_user.id), current_user.email)
 
     return TenantContext(user=current_user, tenant=tenant, role=role, db=db)
 

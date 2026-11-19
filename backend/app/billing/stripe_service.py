@@ -45,16 +45,25 @@ PLAN_CATALOG = {
     }
 }
 
+from backend.app.core.config import settings, is_test_runtime
+
 class StripeService:
-    def __init__(self, webhook_secret: str = "whsec_docuspace_secure_stripe_webhook_2026"):
-        self.webhook_secret = webhook_secret
+    def __init__(self, webhook_secret: Optional[str] = None):
+        if webhook_secret is not None:
+            self.webhook_secret = webhook_secret
+        elif settings.STRIPE_WEBHOOK_SECRET:
+            self.webhook_secret = settings.STRIPE_WEBHOOK_SECRET
+        elif is_test_runtime():
+            self.webhook_secret = "whsec_test_docuspace_ephemeral_unit_secret"
+        else:
+            self.webhook_secret = ""
 
     def verify_webhook_signature(self, payload: bytes, sig_header: str) -> bool:
         """
         Verify Stripe webhook signature using HMAC-SHA256 (Stripe protocol v1).
         Format of sig_header: 't=1612345678,v1=5257a869e7ecebeef225ef2ec...'
         """
-        if not sig_header:
+        if not sig_header or not self.webhook_secret:
             return False
         
         try:

@@ -31,6 +31,11 @@ describe('DocuSpace Crypto & Utility Helpers', () => {
   });
 });
 
+import { FileUploadModal } from '../components/FileUploadModal';
+import { ConfirmActionModal } from '../components/ConfirmActionModal';
+import { RenameModal } from '../components/RenameModal';
+import { apiClient, ApiError } from '../services/api';
+
 describe('DocuSpace Core UI Components', () => {
   it('renders StorageGauge with active plan quota and categories', () => {
     const onUpgrade = vi.fn();
@@ -60,8 +65,10 @@ describe('DocuSpace Core UI Components', () => {
         onLogin={onLogin}
         onRegister={onRegister}
         availableUsers={INITIAL_USERS}
+        errorMessage="Mot de passe invalide"
       />
     );
+    expect(screen.getByRole('alert')).toHaveTextContent('Mot de passe invalide');
     expect(screen.getByText(/Connexion sécurisée avec chiffrement Argon2id/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Créer un compte/i }));
     expect(screen.getByText(/Création de votre espace documentaire personnel/i)).toBeInTheDocument();
@@ -124,5 +131,84 @@ describe('DocuSpace Core UI Components', () => {
     render(<App />);
     expect(screen.getAllByText(/DocuSpace/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Espace Personnel/i).length).toBeGreaterThan(0);
+  });
+});
+
+describe('DocuSpace Phase D Security & UX Hardening', () => {
+  it('rejects double-extension executable masquerading and traversal in FileUploadModal', () => {
+    render(
+      <FileUploadModal
+        isOpen={true}
+        onClose={vi.fn()}
+        currentTenant={INITIAL_TENANTS[0]}
+        currentPlan={PLANS.PERSONAL}
+        currentFolder={null}
+        onUploadSuccess={vi.fn()}
+      />
+    );
+    const input = screen.getByLabelText(/Sélectionner un fichier à importer/i);
+
+    const disguised = new File(['MZ'], 'facture.exe.pdf', { type: 'application/pdf' });
+    fireEvent.change(input, { target: { files: [disguised] } });
+    expect(screen.getByRole('alert')).toHaveTextContent(/double extension exécutable/i);
+
+    const emptyFile = new File([], 'vide.txt', { type: 'text/plain' });
+    fireEvent.change(input, { target: { files: [emptyFile] } });
+    expect(screen.getByRole('alert')).toHaveTextContent(/est vide/i);
+  });
+
+  it('validates ConfirmActionModal and RenameModal accessibility & constraints', () => {
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    render(
+      <ConfirmActionModal
+        isOpen={true}
+        title="Purge définitive"
+        description="Confirmer la suppression ?"
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Confirmer/i }));
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+
+    const onRename = vi.fn();
+    render(
+      <RenameModal
+        isOpen={true}
+        currentName="contrat.pdf"
+        onConfirm={onRename}
+        onCancel={vi.fn()}
+      />
+    );
+    const renameInput = screen.getByLabelText(/Nouveau nom/i);
+    fireEvent.change(renameInput, { target: { value: '../evil.pdf' } });
+    fireEvent.click(screen.getByRole('button', { name: /Enregistrer/i }));
+    expect(screen.getByRole('alert')).toHaveTextContent(/Caractères de chemin interdits/i);
+    expect(onRename).not.toHaveBeenCalled();
+
+    fireEvent.change(renameInput, { target: { value: 'contrat_v2.pdf' } });
+    fireEvent.click(screen.getByRole('button', { name: /Enregistrer/i }));
+    expect(onRename).toHaveBeenCalledWith('contrat_v2.pdf');
+  });
+
+  it('triggers session-expired handler on HTTP 401 in apiClient', async () => {
+    const onUnauthorized = vi.fn();
+    apiClient.setUnauthorizedHandler(onUnauthorized);
+    apiClient.setAccessToken('expired-jwt-token');
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: 'Jeton expiré' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    await expect(apiClient.tenants.list()).rejects.toBeInstanceOf(ApiError);
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    expect(apiClient.getAccessToken()).toBeNull();
+
+    fetchSpy.mockRestore();
+    apiClient.setUnauthorizedHandler(null);
   });
 });

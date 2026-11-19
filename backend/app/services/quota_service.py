@@ -7,7 +7,7 @@ from sqlalchemy import select, func, update, text
 
 from backend.app.models.tenant import StorageUsage, Tenant
 from backend.app.models.plan import Plan
-from backend.app.models.document import Document
+from backend.app.models.document import Document, DocumentVersion
 
 # Canonical plan configurations stored in database
 CANONICAL_PLANS = {
@@ -327,15 +327,32 @@ class QuotaService:
         3. Releases any stale uncommitted reservations (> 1 hour old).
         4. Updates StorageUsage row in PostgreSQL as the single source of truth.
         """
-        # 1. Fetch active documents from PostgreSQL
+        # 1. Fetch all non-purged documents and versions from PostgreSQL
         docs_res = await db.execute(
             select(Document.id, Document.storage_key, Document.size_bytes)
-            .where(Document.tenant_id == tenant_id, Document.is_trashed == False)
+            .where(Document.tenant_id == tenant_id)
         )
         active_docs = docs_res.all()
         db_doc_count = len(active_docs)
-        db_used_bytes = sum(doc.size_bytes for doc in active_docs)
         db_storage_keys = {doc.storage_key for doc in active_docs if doc.storage_key}
+
+        versions_res = await db.execute(
+            select(DocumentVersion.storage_key, DocumentVersion.size_bytes)
+            .where(DocumentVersion.tenant_id == tenant_id)
+        )
+        version_rows = versions_res.all()
+        if version_rows:
+            # Sum unique storage keys across Document + DocumentVersion to avoid double-counting current version
+            size_by_key: Dict[str, int] = {
+                doc.storage_key: doc.size_bytes for doc in active_docs if doc.storage_key
+            }
+            for ver in version_rows:
+                if ver.storage_key and ver.storage_key not in size_by_key:
+                    size_by_key[ver.storage_key] = ver.size_bytes
+                    db_storage_keys.add(ver.storage_key)
+            db_used_bytes = sum(size_by_key.values())
+        else:
+            db_used_bytes = sum(doc.size_bytes for doc in active_docs)
 
         # 2. List objects present in MinIO storage
         prefix = f"tenants/{tenant_id}/"

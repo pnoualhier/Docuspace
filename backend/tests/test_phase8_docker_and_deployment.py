@@ -237,7 +237,7 @@ def test_phase8_alembic_single_head_and_backend_imports():
     )
     heads = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
     assert len(heads) == 1, f"Une seule tête Alembic attendue, trouvé : {heads}"
-    assert heads[0].startswith("0007_complete_schema_rls")
+    assert heads[0].startswith("0008_notif_rls_quarantine")
 
     # Verify backend.app.main imports cleanly using PYTHONPATH=/app style from backend/ dir
     imp_proc = subprocess.run(

@@ -14,9 +14,11 @@ import { User } from '../types';
 interface AuthModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onLogin: (email: string) => void;
-  onRegister: (fullName: string, email: string) => void;
+  onLogin: (email: string, password?: string) => void | Promise<void>;
+  onRegister: (fullName: string, email: string, password?: string) => void | Promise<void>;
   availableUsers: User[];
+  errorMessage?: string | null;
+  isSubmitting?: boolean;
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({
@@ -25,6 +27,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   onLogin,
   onRegister,
   availableUsers,
+  errorMessage = null,
+  isSubmitting = false,
 }) => {
   const [mode, setMode] = useState<'login' | 'register' | 'forgot'>('login');
   const [email, setEmail] = useState('');
@@ -37,9 +41,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (mode === 'login') {
-      onLogin(email);
+      onLogin(email, password);
     } else if (mode === 'register') {
-      onRegister(fullName, email);
+      onRegister(fullName, email, password);
     } else {
       setResetSent(true);
     }
@@ -157,6 +161,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </div>
           )}
 
+          {errorMessage && (
+            <div
+              role="alert"
+              className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs"
+            >
+              {errorMessage}
+            </div>
+          )}
+
           {resetSent && (
             <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-xs">
               Un lien de réinitialisation sécurisé a été généré et envoyé à l'adresse indiquée.
@@ -165,12 +178,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
           <button
             type="submit"
-            className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-lg shadow-blue-500/20 transition-all flex items-center justify-center space-x-2"
+            disabled={isSubmitting}
+            className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-semibold text-xs shadow-lg shadow-blue-500/20 transition-all flex items-center justify-center space-x-2"
           >
             <span>
-              {mode === 'login' && 'Se connecter'}
-              {mode === 'register' && 'Créer mon espace'}
-              {mode === 'forgot' && 'Envoyer le lien'}
+              {isSubmitting
+                ? 'Vérification en cours...'
+                : mode === 'login'
+                  ? 'Se connecter'
+                  : mode === 'register'
+                    ? 'Créer mon espace'
+                    : 'Envoyer le lien'}
             </span>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>

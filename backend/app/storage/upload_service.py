@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import secrets
 import hashlib
@@ -87,15 +88,46 @@ def detect_real_mime_type(sample: bytes, filename: str, fallback_mime: str) -> T
 
     return fallback_mime or "application/octet-stream", False
 
+def sanitize_filename(raw_filename: Optional[str]) -> str:
+    """
+    Normalizes an uploaded filename and blocks path traversal / null-byte / control-character injection.
+    """
+    raw = (raw_filename or "").strip()
+    if not raw:
+        return "sans-nom"
+    if "\x00" in raw:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Nom de fichier invalide (caractère nul interdit)."
+        )
+    # Reject explicit parent-directory traversal attempts
+    normalized_slashes = raw.replace("\\", "/")
+    parts = [p for p in normalized_slashes.split("/") if p]
+    if any(p in (".", "..") for p in parts):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Nom de fichier invalide (tentative de traversée de chemin détectée)."
+        )
+    base = parts[-1] if parts else "sans-nom"
+    # Strip ASCII control characters and reserved filesystem characters
+    base = re.sub(r'[\x00-\x1f\x7f<>:"|?*]', "_", base).strip(" .")
+    if not base or base in (".", ".."):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Nom de fichier invalide après normalisation."
+        )
+    return base[:255]
+
 def generate_secure_storage_key(tenant_id: uuid.UUID, filename: str) -> Tuple[str, str]:
     """
     Generates a secure, cryptographically random storage key.
     Prevents predictable object paths and information leakage.
     """
-    _, ext = os.path.splitext(filename)
-    clean_ext = ext.lstrip(".").lower()
+    safe_name = sanitize_filename(filename)
+    _, ext = os.path.splitext(safe_name)
+    clean_ext = re.sub(r"[^a-z0-9]", "", ext.lstrip(".").lower())[:16]
     random_token = secrets.token_hex(16)
-    storage_key = f"tenants/{tenant_id}/{random_token}.{clean_ext}"
+    storage_key = f"tenants/{tenant_id}/{random_token}.{clean_ext}" if clean_ext else f"tenants/{tenant_id}/{random_token}"
     return storage_key, clean_ext
 
 async def validate_folder_ownership(db: AsyncSession, folder_id: Optional[uuid.UUID], tenant_id: uuid.UUID) -> Optional[Folder]:
@@ -128,7 +160,7 @@ async def stream_and_verify_upload(
     - Inspects initial chunk for magic bytes real MIME type
     - Rejects executable and dangerous signatures immediately
     """
-    filename = file.filename or "sans-nom"
+    filename = sanitize_filename(file.filename)
     if is_prohibited_extension(filename):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -206,7 +238,8 @@ async def create_persisted_upload_session(
         created_at=now
     )
     db.add(session)
-    await db.flush()
+    if hasattr(db, "flush"):
+        await db.flush()
     await db.refresh(session)
     await db.commit()
     return session

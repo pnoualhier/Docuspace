@@ -70,7 +70,26 @@ export const BillingCheckoutModal: React.FC<BillingCheckoutModalProps> = ({
   };
 
   const handleDownloadInvoice = (inv: InvoiceItem) => {
-    alert(`Téléchargement du reçu fiscal Stripe ${inv.number} (${inv.amountEur}€) au format PDF.`);
+    const receiptPayload = JSON.stringify(
+      {
+        invoiceNumber: inv.number,
+        planName: inv.planName,
+        interval: inv.interval,
+        amountEur: inv.amountEur,
+        status: inv.status,
+        issuedAt: inv.date,
+        tenantId: currentTenant.id,
+      },
+      null,
+      2
+    );
+    const blob = new Blob([receiptPayload], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = window.document.createElement('a');
+    link.href = url;
+    link.download = `${inv.number}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
   return (

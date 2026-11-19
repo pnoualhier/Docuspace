@@ -27,30 +27,32 @@ from backend.app.schemas.user import (
     PasswordResetConfirm
 )
 from backend.app.schemas.auth import Token, RefreshTokenRequest, SessionRead
+from backend.app.core.rate_limit import SlidingRateLimiter
 from backend.app.middleware.tenant_context import get_current_user
 
 router = APIRouter()
 
-# In-memory rate limiter for failed login attempts to prevent brute force & account enumeration
-_LOGIN_ATTEMPTS: Dict[str, List[datetime]] = {}
 MAX_LOGIN_ATTEMPTS = 5
 LOCKOUT_WINDOW_MINUTES = 15
 
+# Distributed Redis-backed rate limiter for failed login attempts (with resilient offline test fallback)
+auth_rate_limiter = SlidingRateLimiter(
+    namespace="auth:login",
+    max_attempts=MAX_LOGIN_ATTEMPTS,
+    window_seconds=LOCKOUT_WINDOW_MINUTES * 60,
+)
+
+
 def _is_rate_limited(identifier: str) -> bool:
-    now = datetime.now(timezone.utc)
-    window = now - timedelta(minutes=LOCKOUT_WINDOW_MINUTES)
-    attempts = [t for t in _LOGIN_ATTEMPTS.get(identifier, []) if t > window]
-    _LOGIN_ATTEMPTS[identifier] = attempts
-    return len(attempts) >= MAX_LOGIN_ATTEMPTS
+    return auth_rate_limiter.is_rate_limited(identifier)
 
-def _record_failed_attempt(identifier: str):
-    now = datetime.now(timezone.utc)
-    if identifier not in _LOGIN_ATTEMPTS:
-        _LOGIN_ATTEMPTS[identifier] = []
-    _LOGIN_ATTEMPTS[identifier].append(now)
 
-def _reset_attempts(identifier: str):
-    _LOGIN_ATTEMPTS.pop(identifier, None)
+def _record_failed_attempt(identifier: str) -> int:
+    return auth_rate_limiter.record_failed_attempt(identifier)
+
+
+def _reset_attempts(identifier: str) -> None:
+    auth_rate_limiter.reset_attempts(identifier)
 
 @router.post("/register", response_model=UserRead, status_code=status.HTTP_201_CREATED, tags=["Authentification"])
 async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db)):
