@@ -8,8 +8,16 @@ import {
   ArrowRight,
   KeyRound,
   CheckCircle2,
+  Eye,
+  EyeOff,
+  AlertCircle,
 } from 'lucide-react';
 import { apiClient, ApiError } from '../services/api';
+
+const MIN_PASSWORD_LENGTH = 8;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+export const isValidEmailFormat = (value: string): boolean => EMAIL_REGEX.test(value.trim());
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -34,9 +42,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [resetStep, setResetStep] = useState<'request' | 'confirm'>('request');
   const [resetToken, setResetToken] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [showNewPassword, setShowNewPassword] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [resetMessage, setResetMessage] = useState<string | null>(null);
   const [isResetSubmitting, setIsResetSubmitting] = useState(false);
@@ -44,6 +54,21 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   if (!isOpen) return null;
 
   const displayedError = localError || errorMessage;
+  const trimmedEmail = email.trim();
+  const emailHasText = trimmedEmail.length > 0;
+  const emailIsValid = isValidEmailFormat(trimmedEmail);
+  const passwordLength = password.length;
+  const passwordMeetsLength = passwordLength >= MIN_PASSWORD_LENGTH;
+  const newPasswordLength = newPassword.length;
+  const newPasswordMeetsLength = newPasswordLength >= MIN_PASSWORD_LENGTH;
+
+  const switchMode = (nextMode: 'login' | 'register' | 'forgot') => {
+    setMode(nextMode);
+    setLocalError(null);
+    setResetMessage(null);
+    setShowPassword(false);
+    setShowNewPassword(false);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -51,37 +76,79 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setResetMessage(null);
 
     if (mode === 'login') {
-      await onLogin(email.trim(), password);
+      if (!emailIsValid) {
+        setLocalError("Veuillez saisir une adresse e-mail valide (ex. nom@domaine.fr).");
+        return;
+      }
+      if (!password) {
+        setLocalError('Veuillez saisir votre mot de passe.');
+        return;
+      }
+      await onLogin(trimmedEmail, password);
       return;
     }
 
     if (mode === 'register') {
-      if (password.length < 8) {
-        setLocalError('Le mot de passe doit contenir au moins 8 caractères.');
+      if (fullName.trim().length < 2) {
+        setLocalError('Le nom complet doit contenir au moins 2 caractères.');
         return;
       }
-      await onRegister(fullName.trim(), email.trim(), password);
+      if (!emailIsValid) {
+        setLocalError("L'adresse e-mail saisie est invalide. Vérifiez le format (ex. nom@domaine.fr).");
+        return;
+      }
+      if (!passwordMeetsLength) {
+        setLocalError(
+          `Mot de passe trop court (${passwordLength}/${MIN_PASSWORD_LENGTH} caractères minimum). Veuillez saisir au moins ${MIN_PASSWORD_LENGTH} caractères.`
+        );
+        return;
+      }
+      await onRegister(fullName.trim(), trimmedEmail, password);
+      return;
+    }
+
+    if (resetStep === 'request') {
+      if (!emailIsValid) {
+        setLocalError("Veuillez saisir une adresse e-mail valide pour recevoir le lien de réinitialisation.");
+        return;
+      }
+      setIsResetSubmitting(true);
+      try {
+        const res = await apiClient.auth.passwordResetRequest(trimmedEmail);
+        setResetMessage(res.message);
+        setResetStep('confirm');
+      } catch (err: unknown) {
+        if (err instanceof ApiError) {
+          setLocalError(err.detail);
+        } else {
+          setLocalError('Impossible de traiter la demande de réinitialisation.');
+        }
+      } finally {
+        setIsResetSubmitting(false);
+      }
+      return;
+    }
+
+    if (!resetToken.trim()) {
+      setLocalError('Veuillez coller le jeton de réinitialisation reçu par e-mail.');
+      return;
+    }
+    if (!newPasswordMeetsLength) {
+      setLocalError(
+        `Le nouveau mot de passe est trop court (${newPasswordLength}/${MIN_PASSWORD_LENGTH} caractères minimum).`
+      );
       return;
     }
 
     setIsResetSubmitting(true);
     try {
-      if (resetStep === 'request') {
-        const res = await apiClient.auth.passwordResetRequest(email.trim());
-        setResetMessage(res.message);
-        setResetStep('confirm');
-      } else {
-        if (newPassword.length < 8) {
-          setLocalError('Le nouveau mot de passe doit contenir au moins 8 caractères.');
-          return;
-        }
-        const res = await apiClient.auth.passwordResetConfirm(resetToken.trim(), newPassword);
-        setResetMessage(res.message);
-        setResetToken('');
-        setNewPassword('');
-        setMode('login');
-        setResetStep('request');
-      }
+      const res = await apiClient.auth.passwordResetConfirm(resetToken.trim(), newPassword);
+      setResetMessage(res.message);
+      setResetToken('');
+      setNewPassword('');
+      setShowNewPassword(false);
+      setMode('login');
+      setResetStep('request');
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         setLocalError(err.detail);
@@ -134,10 +201,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           <div className="flex p-1 bg-slate-950 border border-slate-800 rounded-xl text-xs font-medium">
             <button
               type="button"
-              onClick={() => {
-                setMode('login');
-                setLocalError(null);
-              }}
+              onClick={() => switchMode('login')}
               className={`flex-1 py-2 rounded-lg transition-colors ${
                 mode === 'login' ? 'bg-blue-600 text-white font-semibold' : 'text-slate-400 hover:text-slate-200'
               }`}
@@ -146,10 +210,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => {
-                setMode('register');
-                setLocalError(null);
-              }}
+              onClick={() => switchMode('register')}
               className={`flex-1 py-2 rounded-lg transition-colors ${
                 mode === 'register' ? 'bg-blue-600 text-white font-semibold' : 'text-slate-400 hover:text-slate-200'
               }`}
@@ -160,7 +221,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         )}
 
         {/* Form */}
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} noValidate className="space-y-4">
           {mode === 'register' && (
             <div>
               <label htmlFor="auth-fullname" className="block text-xs font-semibold text-slate-300 mb-1">
@@ -173,7 +234,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   type="text"
                   required
                   value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
+                  onChange={(e) => {
+                    setFullName(e.target.value);
+                    if (localError) setLocalError(null);
+                  }}
                   placeholder="Prénom Nom"
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-4 py-2.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500"
                 />
@@ -193,11 +257,37 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   type="email"
                   required
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
+                  onChange={(e) => {
+                    setEmail(e.target.value);
+                    if (localError) setLocalError(null);
+                  }}
                   placeholder="nom@domaine.fr"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-4 py-2.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                  className={`w-full bg-slate-950 border rounded-xl pl-9 pr-4 py-2.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none ${
+                    emailHasText && !emailIsValid
+                      ? 'border-amber-500/60 focus:border-amber-400'
+                      : 'border-slate-800 focus:border-blue-500'
+                  }`}
                 />
               </div>
+              {mode === 'register' && emailHasText && (
+                <p
+                  className={`mt-1.5 text-[11px] flex items-center gap-1.5 ${
+                    emailIsValid ? 'text-emerald-400' : 'text-amber-400'
+                  }`}
+                >
+                  {emailIsValid ? (
+                    <>
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                      <span>Format d&apos;adresse e-mail valide</span>
+                    </>
+                  ) : (
+                    <>
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span>Format d&apos;e-mail attendu : nom@domaine.fr</span>
+                    </>
+                  )}
+                </p>
+              )}
             </div>
           )}
 
@@ -211,10 +301,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      setMode('forgot');
+                      switchMode('forgot');
                       setResetStep('request');
-                      setResetMessage(null);
-                      setLocalError(null);
                     }}
                     className="text-[11px] text-blue-400 hover:text-blue-300"
                   >
@@ -226,14 +314,58 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <Lock className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
                   id="auth-password"
-                  type="password"
+                  type={showPassword ? 'text' : 'password'}
                   required
+                  minLength={mode === 'register' ? MIN_PASSWORD_LENGTH : undefined}
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    if (localError) setLocalError(null);
+                  }}
                   placeholder="Minimum 8 caractères"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-4 py-2.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                  className={`w-full bg-slate-950 border rounded-xl pl-9 pr-10 py-2.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none ${
+                    mode === 'register' && passwordLength > 0 && !passwordMeetsLength
+                      ? 'border-amber-500/60 focus:border-amber-400'
+                      : 'border-slate-800 focus:border-blue-500'
+                  }`}
                 />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((prev) => !prev)}
+                  aria-label={showPassword ? 'Masquer la saisie en clair' : 'Afficher la saisie en clair'}
+                  aria-pressed={showPassword}
+                  title={showPassword ? 'Masquer le mot de passe' : 'Voir le mot de passe en clair'}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800/70 transition-colors"
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
               </div>
+              {mode === 'register' && (
+                <div className="mt-1.5 flex items-center justify-between text-[11px]">
+                  <span
+                    className={`flex items-center gap-1.5 ${
+                      passwordLength === 0
+                        ? 'text-slate-400'
+                        : passwordMeetsLength
+                          ? 'text-emerald-400'
+                          : 'text-amber-400'
+                    }`}
+                  >
+                    {passwordMeetsLength ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    ) : (
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    )}
+                    <span>
+                      {passwordLength === 0
+                        ? `Au moins ${MIN_PASSWORD_LENGTH} caractères requis`
+                        : passwordMeetsLength
+                          ? `Longueur conforme (${passwordLength} caractères)`
+                          : `Trop court : ${passwordLength}/${MIN_PASSWORD_LENGTH} caractères minimum`}
+                    </span>
+                  </span>
+                </div>
+              )}
             </div>
           )}
 
@@ -250,7 +382,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     type="text"
                     required
                     value={resetToken}
-                    onChange={(e) => setResetToken(e.target.value)}
+                    onChange={(e) => {
+                      setResetToken(e.target.value);
+                      if (localError) setLocalError(null);
+                    }}
                     placeholder="Collez le jeton reçu par e-mail"
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-4 py-2.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono"
                   />
@@ -264,15 +399,54 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <Lock className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     id="auth-new-password"
-                    type="password"
+                    type={showNewPassword ? 'text' : 'password'}
                     required
-                    minLength={8}
+                    minLength={MIN_PASSWORD_LENGTH}
                     value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
+                    onChange={(e) => {
+                      setNewPassword(e.target.value);
+                      if (localError) setLocalError(null);
+                    }}
                     placeholder="Minimum 8 caractères"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-4 py-2.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-10 py-2.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500"
                   />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPassword((prev) => !prev)}
+                    aria-label={
+                      showNewPassword
+                        ? 'Masquer le nouveau mot de passe en clair'
+                        : 'Afficher le nouveau mot de passe en clair'
+                    }
+                    aria-pressed={showNewPassword}
+                    title={showNewPassword ? 'Masquer' : 'Voir en clair'}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800/70 transition-colors"
+                  >
+                    {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
+                <p
+                  className={`mt-1.5 text-[11px] flex items-center gap-1.5 ${
+                    newPasswordLength === 0
+                      ? 'text-slate-400'
+                      : newPasswordMeetsLength
+                        ? 'text-emerald-400'
+                        : 'text-amber-400'
+                  }`}
+                >
+                  {newPasswordMeetsLength ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  ) : (
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  )}
+                  <span>
+                    {newPasswordLength === 0
+                      ? `Au moins ${MIN_PASSWORD_LENGTH} caractères requis`
+                      : newPasswordMeetsLength
+                        ? `Longueur conforme (${newPasswordLength} caractères)`
+                        : `Trop court : ${newPasswordLength}/${MIN_PASSWORD_LENGTH} caractères minimum`}
+                  </span>
+                </p>
               </div>
             </>
           )}
@@ -280,7 +454,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           {displayedError && (
             <div
               role="alert"
-              className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs"
+              className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs leading-relaxed"
             >
               {displayedError}
             </div>
@@ -319,10 +493,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <div className="flex items-center justify-between pt-2 text-xs">
               <button
                 type="button"
-                onClick={() => {
-                  setMode('login');
-                  setLocalError(null);
-                }}
+                onClick={() => switchMode('login')}
                 className="text-slate-400 hover:text-white"
               >
                 ← Retour à la connexion

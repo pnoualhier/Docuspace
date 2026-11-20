@@ -1,7 +1,7 @@
 from typing import Optional
 from uuid import UUID
 from datetime import datetime
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 class Token(BaseModel):
     access_token: str
@@ -24,6 +24,17 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, description="Minimum 8 caractères")
     full_name: str = Field(min_length=2, max_length=100)
+
+    @field_validator("full_name")
+    @classmethod
+    def _validate_full_name(cls, v: str) -> str:
+        cleaned = (v or "").strip()
+        if len(cleaned) < 2:
+            raise ValueError("Le nom complet doit contenir au moins 2 caractères.")
+        return cleaned
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
 
 class PasswordResetRequest(BaseModel):
     email: EmailStr

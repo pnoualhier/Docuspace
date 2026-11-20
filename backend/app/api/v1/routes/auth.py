@@ -1,10 +1,12 @@
 import uuid
 import secrets
 import hashlib
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict
-from fastapi import APIRouter, Depends, HTTPException, status, Response, Request, Query, Cookie
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Response, Request, Query, Cookie
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy import select, update
 from jose import JWTError
 
@@ -19,9 +21,11 @@ from backend.app.core.security import (
 )
 from backend.app.models.user import User, Session
 from backend.app.models.tenant import Tenant, TenantMember, StorageUsage
+from backend.app.models.audit import AuditLog
 from backend.app.schemas.user import (
     UserRead,
     RegisterRequest,
+    ResendVerificationRequest,
     LoginRequest,
     PasswordResetRequest,
     PasswordResetConfirm
@@ -29,7 +33,13 @@ from backend.app.schemas.user import (
 from backend.app.schemas.auth import Token, RefreshTokenRequest, SessionRead
 from backend.app.core.rate_limit import SlidingRateLimiter
 from backend.app.middleware.tenant_context import get_current_user
+from backend.app.services.email_service import (
+    send_welcome_space_email,
+    send_login_notification_email,
+    send_password_reset_email,
+)
 
+logger = logging.getLogger("docuspace.auth")
 router = APIRouter()
 
 MAX_LOGIN_ATTEMPTS = 5
@@ -55,12 +65,18 @@ def _reset_attempts(identifier: str) -> None:
     auth_rate_limiter.reset_attempts(identifier)
 
 @router.post("/register", response_model=UserRead, status_code=status.HTTP_201_CREATED, tags=["Authentification"])
-async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db)):
+async def register(
+    payload: RegisterRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     """
     Registers a new user and automatically provisions their personal isolated document tenant
-    inside a single atomic database transaction.
+    inside a single atomic database transaction, then queues standard welcome & space-validation email.
     """
-    existing_user = await db.execute(select(User).where(User.email == payload.email.lower()))
+    normalized_email = payload.email.lower()
+    existing_user = await db.execute(select(User).where(User.email == normalized_email))
     if existing_user.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -69,53 +85,104 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
 
     verification_token = secrets.token_urlsafe(32)
     verification_expires = datetime.now(timezone.utc) + timedelta(hours=24)
-
-    # 1. Create User
-    new_user = User(
-        email=payload.email.lower(),
-        hashed_password=get_password_hash(payload.password),
-        full_name=payload.full_name,
-        is_active=True,
-        is_verified=True, # Pre-verified for standard setup; token stored for audit/validation
-        verification_token=verification_token,
-        verification_token_expires_at=verification_expires
-    )
-    db.add(new_user)
-    await db.flush()
-
-    # 2. Automatically provision Personal Tenant
     tenant_name = f"Espace de {payload.full_name}"
-    personal_tenant = Tenant(
-        name=tenant_name,
-        owner_id=new_user.id,
-        plan_id="FREE",
-        is_active=True
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    user_agent = request.headers.get("user-agent", "")[:512]
+
+    try:
+        # 1. Create User
+        new_user = User(
+            email=normalized_email,
+            hashed_password=get_password_hash(payload.password),
+            full_name=payload.full_name,
+            is_active=True,
+            is_verified=not settings.EMAIL_VERIFICATION_REQUIRED,
+            verification_token=verification_token,
+            verification_token_expires_at=verification_expires
+        )
+        db.add(new_user)
+        await db.flush()
+
+        # 2. Automatically provision Personal Tenant
+        personal_tenant = Tenant(
+            name=tenant_name,
+            owner_id=new_user.id,
+            plan_id="FREE",
+            is_active=True
+        )
+        db.add(personal_tenant)
+        await db.flush()
+
+        await set_tenant_context(db, str(personal_tenant.id))
+
+        # 3. Associate as OWNER
+        membership = TenantMember(
+            tenant_id=personal_tenant.id,
+            user_id=new_user.id,
+            role="OWNER"
+        )
+        db.add(membership)
+
+        # 4. Initialize Storage Usage Quota Tracker
+        storage = StorageUsage(
+            tenant_id=personal_tenant.id,
+            used_bytes=0,
+            reserved_bytes=0,
+            document_count=0
+        )
+        db.add(storage)
+
+        # 5. Record creation audit event
+        db.add(
+            AuditLog(
+                tenant_id=personal_tenant.id,
+                user_id=new_user.id,
+                action="AUTH_REGISTER_SPACE",
+                resource_type="TENANT",
+                resource_id=personal_tenant.id,
+                details={
+                    "tenant_name": tenant_name,
+                    "plan_id": "FREE",
+                    "email_verification_required": settings.EMAIL_VERIFICATION_REQUIRED,
+                },
+                ip_address=client_ip,
+                user_agent=user_agent,
+            )
+        )
+
+        await db.flush()
+        await db.refresh(new_user)
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Une adresse e-mail identique est déjà enregistrée"
+        )
+    except SQLAlchemyError as exc:
+        await db.rollback()
+        logger.error("register_space_db_error email=%s error=%s", normalized_email, type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors du provisionnement du compte et de votre espace documentaire en base de données."
+        )
+    except Exception as exc:
+        await db.rollback()
+        logger.error("register_space_unexpected_error email=%s error=%s", normalized_email, type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Impossible de finaliser la création de votre espace documentaire."
+        )
+
+    background_tasks.add_task(
+        send_welcome_space_email,
+        recipient_email=new_user.email,
+        full_name=new_user.full_name,
+        tenant_name=tenant_name,
+        verification_token=verification_token,
+        verification_required=settings.EMAIL_VERIFICATION_REQUIRED,
     )
-    db.add(personal_tenant)
-    await db.flush()
 
-    await set_tenant_context(db, str(personal_tenant.id))
-
-    # 3. Associate as OWNER
-    membership = TenantMember(
-        tenant_id=personal_tenant.id,
-        user_id=new_user.id,
-        role="OWNER"
-    )
-    db.add(membership)
-
-    # 4. Initialize Storage Usage Quota Tracker
-    storage = StorageUsage(
-        tenant_id=personal_tenant.id,
-        used_bytes=0,
-        reserved_bytes=0,
-        document_count=0
-    )
-    db.add(storage)
-
-    await db.flush()
-    await db.refresh(new_user)
-    await db.commit()
     return new_user
 
 @router.get("/verify-email", tags=["Authentification"])
@@ -138,19 +205,55 @@ async def verify_email(token: str = Query(..., description="Jeton de vérificati
     user.verification_token_expires_at = None
     await db.commit()
 
-    return {"message": "Adresse e-mail vérifiée avec succès."}
+    return {"message": "Adresse e-mail vérifiée et espace documentaire confirmé avec succès."}
+
+@router.post("/resend-verification", tags=["Authentification"])
+async def resend_verification_email(
+    payload: ResendVerificationRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Régénère un jeton de validation d'espace (24h) et renvoie l'e-mail de confirmation."""
+    user_res = await db.execute(select(User).where(User.email == payload.email.lower()))
+    user = user_res.scalar_one_or_none()
+
+    if user and user.is_active and not user.is_verified:
+        verification_token = secrets.token_urlsafe(32)
+        user.verification_token = verification_token
+        user.verification_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+        await db.commit()
+
+        tenant_res = await db.execute(
+            select(Tenant).where(Tenant.owner_id == user.id, Tenant.is_active == True).limit(1)
+        )
+        tenant = tenant_res.scalar_one_or_none()
+        tenant_name = tenant.name if tenant else f"Espace de {user.full_name}"
+
+        background_tasks.add_task(
+            send_welcome_space_email,
+            recipient_email=user.email,
+            full_name=user.full_name,
+            tenant_name=tenant_name,
+            verification_token=verification_token,
+            verification_required=settings.EMAIL_VERIFICATION_REQUIRED,
+        )
+
+    return {
+        "message": "Si un compte non vérifié correspond à cette adresse, un nouveau lien de validation a été envoyé."
+    }
 
 @router.post("/login", response_model=Token, tags=["Authentification"])
 async def login(
     payload: LoginRequest,
     response: Response,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db)
 ):
     """
     Authenticates a user with Argon2id and generates JWT tokens.
-    Persists active session in PostgreSQL and sets HttpOnly cookies.
-    Enforces brute-force rate-limiting and anti account-enumeration.
+    Persists active session in PostgreSQL, sets HttpOnly cookies, and queues standard
+    login confirmation email. Enforces brute-force rate-limiting and anti account-enumeration.
     """
     client_ip = request.client.host if request.client else "127.0.0.1"
     rate_limit_key = f"{client_ip}:{payload.email.lower()}"
@@ -176,6 +279,12 @@ async def login(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Ce compte utilisateur est suspendu"
+        )
+
+    if settings.EMAIL_VERIFICATION_REQUIRED and not user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Adresse e-mail non confirmée. Veuillez valider votre espace via le lien reçu par e-mail."
         )
 
     _reset_attempts(rate_limit_key)
@@ -208,7 +317,30 @@ async def login(
         last_active_at=now
     )
     db.add(session_record)
+    if tenant:
+        await set_tenant_context(db, str(tenant.id))
+        db.add(
+            AuditLog(
+                tenant_id=tenant.id,
+                user_id=user.id,
+                action="AUTH_LOGIN",
+                resource_type="USER",
+                resource_id=user.id,
+                details={"email": user.email},
+                ip_address=client_ip,
+                user_agent=user_agent,
+            )
+        )
     await db.commit()
+
+    background_tasks.add_task(
+        send_login_notification_email,
+        recipient_email=user.email,
+        full_name=user.full_name,
+        ip_address=client_ip,
+        user_agent=user_agent,
+        login_time_utc=now,
+    )
 
     is_secure = settings.APP_ENV == "production"
 
@@ -411,6 +543,7 @@ async def revoke_all_sessions(
 @router.post("/password-reset/request", tags=["Authentification"])
 async def request_password_reset(
     payload: PasswordResetRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -421,9 +554,16 @@ async def request_password_reset(
     user = user_res.scalar_one_or_none()
 
     if user and user.is_active:
-        user.reset_password_token = secrets.token_urlsafe(32)
+        reset_token = secrets.token_urlsafe(32)
+        user.reset_password_token = reset_token
         user.reset_password_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
         await db.commit()
+        background_tasks.add_task(
+            send_password_reset_email,
+            recipient_email=user.email,
+            full_name=user.full_name,
+            reset_token=reset_token,
+        )
 
     return {"message": "Si l'adresse e-mail est valide, un lien de réinitialisation a été envoyé."}
 

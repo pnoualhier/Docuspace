@@ -418,12 +418,36 @@ export default function App() {
     };
   }, [resetSessionState, showFeedback]);
 
-  // Bootstrap real session & catalog on startup (no mock fallback)
+  // Bootstrap real session, email verification token & catalog on startup (no mock fallback)
   useEffect(() => {
     let cancelled = false;
     const bootstrap = async () => {
       setIsBootstrapping(true);
       try {
+        if (typeof window !== 'undefined' && window.location.pathname === '/verify-email') {
+          const params = new URLSearchParams(window.location.search);
+          const verificationToken = params.get('token');
+          if (verificationToken) {
+            try {
+              const verifyRes = await apiClient.auth.verifyEmail(verificationToken);
+              if (!cancelled) {
+                showFeedback('success', verifyRes.message);
+              }
+            } catch (err: unknown) {
+              if (!cancelled) {
+                showFeedback(
+                  'error',
+                  err instanceof ApiError
+                    ? err.detail
+                    : 'Impossible de vérifier le lien de confirmation e-mail.'
+                );
+              }
+            } finally {
+              window.history.replaceState({}, '', '/');
+            }
+          }
+        }
+
         const plansPromise = apiClient.billing.plans().catch(() => []);
         const mePromise = apiClient.auth.me({ skipAuthCallback: true }).catch(() => null);
 
@@ -468,7 +492,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [resetSessionState, syncWorkspaceFromApi]);
+  }, [resetSessionState, syncWorkspaceFromApi, showFeedback]);
 
   // Resolved active tenant & plan
   const currentTenant = useMemo(() => {
@@ -671,6 +695,16 @@ export default function App() {
 
       const mappedUser = mapApiUser(me);
       const mappedTenants = apiTenants.map(mapApiTenant);
+      const targetTenantId = tokenRes.tenant_id || mappedTenants[0]?.id || null;
+
+      if (mappedTenants.length === 0 || !targetTenantId) {
+        resetSessionState();
+        setAuthError(
+          "Connexion authentifiée, mais aucun espace documentaire actif n'est associé à ce compte."
+        );
+        return;
+      }
+
       if (apiPlans.length > 0) {
         setPlans(apiPlans.map(mapApiPlan));
       }
@@ -678,18 +712,15 @@ export default function App() {
       clearWorkspaceState();
       setCurrentUser(mappedUser);
       setTenants(mappedTenants);
-
-      const targetTenantId = tokenRes.tenant_id || mappedTenants[0]?.id || null;
       setCurrentTenantId(targetTenantId);
 
-      if (targetTenantId) {
-        await syncWorkspaceFromApi(targetTenantId);
-      }
-
+      await syncWorkspaceFromApi(targetTenantId);
       showFeedback('success', `Connexion réussie en tant que ${mappedUser.fullName}.`);
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         setAuthError(err.detail);
+      } else if (err instanceof Error && err.message) {
+        setAuthError(err.message);
       } else {
         setAuthError('Impossible de joindre le serveur d’authentification.');
       }
@@ -703,15 +734,56 @@ export default function App() {
     setIsAuthSubmitting(true);
     try {
       await apiClient.auth.register(fullName, email, password);
-      const tokenRes = await apiClient.auth.login(email, password);
-      const [me, apiTenants, apiPlans] = await Promise.all([
-        apiClient.auth.me(),
-        apiClient.tenants.list(),
-        apiClient.billing.plans().catch(() => []),
-      ]);
+
+      let tokenRes;
+      try {
+        tokenRes = await apiClient.auth.login(email, password);
+      } catch (loginErr: unknown) {
+        if (loginErr instanceof ApiError && loginErr.status === 403) {
+          setAuthError(
+            `Compte créé, validation par e-mail requise avant connexion : ${loginErr.detail}`
+          );
+          return;
+        }
+        const detail =
+          loginErr instanceof ApiError
+            ? loginErr.detail
+            : 'erreur lors de l’ouverture de session.';
+        setAuthError(`Compte créé, mais l'accès automatique à l'espace a échoué : ${detail}`);
+        return;
+      }
+
+      let me: ApiUser;
+      let apiTenants: ApiTenant[];
+      let apiPlans: ApiPlan[];
+      try {
+        [me, apiTenants, apiPlans] = await Promise.all([
+          apiClient.auth.me(),
+          apiClient.tenants.list(),
+          apiClient.billing.plans().catch(() => []),
+        ]);
+      } catch (hydrateErr: unknown) {
+        resetSessionState();
+        const detail =
+          hydrateErr instanceof ApiError
+            ? hydrateErr.detail
+            : 'erreur lors de la récupération de votre espace documentaire.';
+        setAuthError(`Erreur lors de l'initialisation de votre espace : ${detail}`);
+        return;
+      }
 
       const mappedUser = mapApiUser(me);
       const mappedTenants = apiTenants.map(mapApiTenant);
+      const targetTenantId = tokenRes.tenant_id || mappedTenants[0]?.id || null;
+
+      if (mappedTenants.length === 0 || !targetTenantId) {
+        resetSessionState();
+        setAuthError(
+          "Le compte utilisateur a bien été créé, mais aucun espace documentaire n'a pu être provisionné."
+        );
+        return;
+      }
+
       if (apiPlans.length > 0) {
         setPlans(apiPlans.map(mapApiPlan));
       }
@@ -719,20 +791,17 @@ export default function App() {
       clearWorkspaceState();
       setCurrentUser(mappedUser);
       setTenants(mappedTenants);
-
-      const targetTenantId = tokenRes.tenant_id || mappedTenants[0]?.id || null;
       setCurrentTenantId(targetTenantId);
 
-      if (targetTenantId) {
-        await syncWorkspaceFromApi(targetTenantId);
-      }
-
+      await syncWorkspaceFromApi(targetTenantId);
       showFeedback('success', `Compte et espace personnel créés pour ${mappedUser.fullName}.`);
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         setAuthError(err.detail);
+      } else if (err instanceof Error && err.message) {
+        setAuthError(`Erreur lors de la création de l'espace : ${err.message}`);
       } else {
-        setAuthError('Impossible de créer le compte sur le serveur.');
+        setAuthError('Impossible de créer le compte et l’espace documentaire sur le serveur.');
       }
     } finally {
       setIsAuthSubmitting(false);

@@ -105,3 +105,92 @@ def test_phase2_registration_payload_validation():
         "full_name": "Test User"
     })
     assert resp.status_code == 422
+
+    # Whitespace-only full name
+    resp = client.post("/api/v1/auth/register", json={
+        "email": "valid@example.com",
+        "password": "validPassword123!",
+        "full_name": "   "
+    })
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_phase2_email_service_standard_templates_and_graceful_skip(monkeypatch):
+    """Verify standard welcome/login emails degrade gracefully when SMTP is unconfigured and build proper payloads."""
+    from backend.app.core.config import settings
+    from backend.app.services import email_service
+
+    monkeypatch.setattr(settings, "SMTP_HOST", "smtp.example.com")
+    monkeypatch.setattr(settings, "SMTP_PASSWORD", "not-configured-in-preview")
+    assert email_service.is_smtp_configured() is False
+
+    welcome_res = await email_service.send_welcome_space_email(
+        recipient_email="user@example.com",
+        full_name="Pat Noualhier",
+        tenant_name="Espace de Pat Noualhier",
+        verification_token="tok-verify-123",
+        verification_required=True,
+    )
+    assert welcome_res.sent is False
+    assert welcome_res.status == "skipped_unconfigured"
+
+    login_res = await email_service.send_login_notification_email(
+        recipient_email="user@example.com",
+        full_name="Pat Noualhier",
+        ip_address="192.0.2.10",
+        user_agent="Firefox/128.0",
+    )
+    assert login_res.sent is False
+    assert login_res.status == "skipped_unconfigured"
+
+    captured = {}
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=8):
+            captured["host"] = host
+            captured["port"] = port
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def ehlo(self):
+            captured["ehlo"] = True
+        def starttls(self):
+            captured["starttls"] = True
+        def login(self, user, password):
+            captured["login"] = (user, password)
+        def send_message(self, msg):
+            captured["subject"] = msg["Subject"]
+            captured["to"] = msg["To"]
+            captured["body"] = msg.get_body(preferencelist=("plain",)).get_content()
+
+    monkeypatch.setattr(settings, "SMTP_HOST", "smtp.mailtest.local")
+    monkeypatch.setattr(settings, "SMTP_PORT", 587)
+    monkeypatch.setattr(settings, "SMTP_USER", "mailer@docuspace.fr")
+    monkeypatch.setattr(settings, "SMTP_PASSWORD", "real_smtp_secret_test")
+    monkeypatch.setattr(settings, "SMTP_TLS", True)
+    monkeypatch.setattr(email_service.smtplib, "SMTP", FakeSMTP)
+
+    assert email_service.is_smtp_configured() is True
+    sent_welcome = await email_service.send_welcome_space_email(
+        recipient_email="pat@example.com",
+        full_name="Pat Noualhier",
+        tenant_name="Espace de Pat Noualhier",
+        verification_token="tok-abc",
+        verification_required=True,
+    )
+    assert sent_welcome.sent is True
+    assert captured["to"] == "pat@example.com"
+    assert "/verify-email?token=tok-abc" in captured["body"]
+
+    sent_login = await email_service.send_login_notification_email(
+        recipient_email="pat@example.com",
+        full_name="Pat Noualhier",
+        ip_address="203.0.113.5",
+        user_agent="Chrome/126",
+    )
+    assert sent_login.sent is True
+    assert "Confirmation de connexion" in captured["subject"]
+    assert "203.0.113.5" in captured["body"]
+

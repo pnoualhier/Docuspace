@@ -1,5 +1,11 @@
+export interface ApiValidationDetailItem {
+  loc?: Array<string | number>;
+  msg?: string;
+  type?: string;
+}
+
 export interface ApiErrorPayload {
-  detail?: string;
+  detail?: string | ApiValidationDetailItem[];
   message?: string;
 }
 
@@ -348,6 +354,52 @@ class DocuSpaceApiClient {
     return this.refreshPromise;
   }
 
+  private formatValidationErrors(items: ApiValidationDetailItem[]): string {
+    const messages = items
+      .map((item) => {
+        const field = String(item.loc?.[item.loc.length - 1] ?? '').toLowerCase();
+        const rawMsg = (item.msg || '').toLowerCase();
+        if (field === 'email' || rawMsg.includes('email')) {
+          return 'Adresse e-mail invalide. Vérifiez le format (ex. nom@domaine.fr).';
+        }
+        if (field === 'password' || field === 'new_password') {
+          if (rawMsg.includes('at least') || rawMsg.includes('min_length') || rawMsg.includes('8')) {
+            return 'Le mot de passe est trop court : il doit contenir au moins 8 caractères.';
+          }
+          return 'Mot de passe non conforme aux exigences de sécurité.';
+        }
+        if (field === 'full_name') {
+          return 'Le nom complet doit contenir au moins 2 caractères.';
+        }
+        return item.msg || null;
+      })
+      .filter((m): m is string => Boolean(m));
+
+    if (messages.length > 0) {
+      return Array.from(new Set(messages)).join(' ');
+    }
+    return 'Les informations saisies sont invalides ou incomplètes (erreur de validation 422).';
+  }
+
+  private buildFallbackHttpErrorMessage(status: number, path: string): string {
+    if (status === 404) {
+      return `Service API backend introuvable (HTTP 404 sur ${this.baseUrl}${path}). Le serveur FastAPI ou le proxy Nginx n'est pas actif sur cet environnement ; démarrez la pile complète (backend FastAPI + PostgreSQL) pour créer ou ouvrir un espace.`;
+    }
+    if (status === 405) {
+      return `Méthode HTTP non autorisée sur ${this.baseUrl}${path} (HTTP 405). Vérifiez le routage du proxy API.`;
+    }
+    if (status === 429) {
+      return 'Trop de tentatives effectuées. Veuillez patienter quelques minutes avant de réessayer (HTTP 429).';
+    }
+    if (status === 502 || status === 503 || status === 504) {
+      return `Le serveur backend DocuSpace ou PostgreSQL est temporairement indisponible (HTTP ${status}).`;
+    }
+    if (status >= 500) {
+      return `Erreur interne du serveur lors du traitement de la requête (HTTP ${status}).`;
+    }
+    return `Erreur HTTP ${status}`;
+  }
+
   private async request<T>(
     path: string,
     options: RequestInit & {
@@ -363,11 +415,19 @@ class DocuSpaceApiClient {
       mergedHeaders['Content-Type'] = 'application/json';
     }
 
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      ...fetchOpts,
-      headers: mergedHeaders,
-      credentials: 'include',
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}${path}`, {
+        ...fetchOpts,
+        headers: mergedHeaders,
+        credentials: 'include',
+      });
+    } catch {
+      throw new ApiError(
+        0,
+        "Impossible de joindre le serveur API DocuSpace. Vérifiez votre connexion réseau et que le backend FastAPI est démarré."
+      );
+    }
 
     if (response.status === 401 && !skipRefreshRetry && path !== '/auth/login' && path !== '/auth/refresh') {
       const refreshed = await this.tryRefreshSession();
@@ -377,16 +437,21 @@ class DocuSpaceApiClient {
     }
 
     if (!response.ok) {
-      let detail = `Erreur HTTP ${response.status}`;
+      let detail = this.buildFallbackHttpErrorMessage(response.status, path);
       try {
-        const body = (await response.json()) as ApiErrorPayload;
-        if (body && typeof body.detail === 'string') {
-          detail = body.detail;
-        } else if (body && typeof body.message === 'string') {
-          detail = body.message;
+        const rawText = await response.text();
+        if (rawText) {
+          const body = JSON.parse(rawText) as ApiErrorPayload;
+          if (body && typeof body.detail === 'string' && body.detail.trim()) {
+            detail = body.detail;
+          } else if (body && Array.isArray(body.detail) && body.detail.length > 0) {
+            detail = this.formatValidationErrors(body.detail);
+          } else if (body && typeof body.message === 'string' && body.message.trim()) {
+            detail = body.message;
+          }
         }
       } catch {
-        // Non-JSON error body
+        // Non-JSON error body (e.g. Vite/Nginx HTML 404/502 page): keep explicit status message
       }
       if (response.status === 401 && !skipAuthCallback && this.onUnauthorized) {
         this.accessToken = null;
@@ -463,6 +528,19 @@ class DocuSpaceApiClient {
       this.request<{ message: string }>('/auth/password-reset/confirm', {
         method: 'POST',
         body: JSON.stringify({ token, new_password: newPassword }),
+        skipAuthCallback: true,
+        skipRefreshRetry: true,
+      }),
+    verifyEmail: (token: string) =>
+      this.request<{ message: string }>(`/auth/verify-email?token=${encodeURIComponent(token)}`, {
+        method: 'GET',
+        skipAuthCallback: true,
+        skipRefreshRetry: true,
+      }),
+    resendVerification: (email: string) =>
+      this.request<{ message: string }>('/auth/resend-verification', {
+        method: 'POST',
+        body: JSON.stringify({ email }),
         skipAuthCallback: true,
         skipRefreshRetry: true,
       }),
@@ -730,7 +808,13 @@ class DocuSpaceApiClient {
             let detail = `Échec du téléversement (HTTP ${xhr.status})`;
             try {
               const parsed = JSON.parse(xhr.responseText) as ApiErrorPayload;
-              if (parsed.detail) detail = parsed.detail;
+              if (typeof parsed.detail === 'string' && parsed.detail.trim()) {
+                detail = parsed.detail;
+              } else if (Array.isArray(parsed.detail) && parsed.detail.length > 0) {
+                detail = this.formatValidationErrors(parsed.detail);
+              } else if (typeof parsed.message === 'string' && parsed.message.trim()) {
+                detail = parsed.message;
+              }
             } catch {
               // ignore
             }

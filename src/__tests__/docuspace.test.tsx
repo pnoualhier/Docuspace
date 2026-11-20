@@ -1020,4 +1020,166 @@ describe('DocuSpace Dynamic Component Workflows', () => {
       }
     }
   });
+
+  it('15. AuthModal provides show/hide password toggle, email check, and 8-char password check', () => {
+    const onLogin = vi.fn();
+    const onRegister = vi.fn();
+
+    render(
+      <AuthModal
+        isOpen={true}
+        onClose={vi.fn()}
+        onLogin={onLogin}
+        onRegister={onRegister}
+      />
+    );
+
+    const pwdInput = screen.getByLabelText(/Mot de passe/i) as HTMLInputElement;
+    expect(pwdInput.type).toBe('password');
+
+    const toggleBtn = screen.getByRole('button', { name: /Afficher la saisie en clair/i });
+    fireEvent.click(toggleBtn);
+    expect(pwdInput.type).toBe('text');
+
+    fireEvent.click(screen.getByRole('button', { name: /Masquer la saisie en clair/i }));
+    expect(pwdInput.type).toBe('password');
+
+    // Switch to register mode
+    fireEvent.click(screen.getByRole('button', { name: /Créer un compte/i }));
+
+    fireEvent.change(screen.getByLabelText(/Nom complet/i), {
+      target: { value: 'Pat Noualhier' },
+    });
+    fireEvent.change(screen.getByLabelText(/Adresse e-mail/i), {
+      target: { value: 'email-invalide' },
+    });
+    fireEvent.change(screen.getByLabelText(/Mot de passe/i), {
+      target: { value: '12345' },
+    });
+
+    expect(screen.getByText(/Format d'e-mail attendu/i)).toBeInTheDocument();
+    expect(screen.getByText(/Trop court : 5\/8 caractères minimum/i)).toBeInTheDocument();
+
+    // Submit with invalid email
+    fireEvent.click(screen.getByRole('button', { name: /Créer mon espace/i }));
+    expect(screen.getByRole('alert')).toHaveTextContent(/adresse e-mail saisie est invalide/i);
+    expect(onRegister).not.toHaveBeenCalled();
+
+    // Fix email, keep short password
+    fireEvent.change(screen.getByLabelText(/Adresse e-mail/i), {
+      target: { value: 'pat@example.fr' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Créer mon espace/i }));
+    expect(screen.getByRole('alert')).toHaveTextContent(/Mot de passe trop court \(5\/8/i);
+    expect(onRegister).not.toHaveBeenCalled();
+
+    // Fix password (>= 8 chars)
+    fireEvent.change(screen.getByLabelText(/Mot de passe/i), {
+      target: { value: 'MotDePasseValide123' },
+    });
+    expect(screen.getByText(/Longueur conforme \(19 caractères\)/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Créer mon espace/i }));
+    expect(onRegister).toHaveBeenCalledWith('Pat Noualhier', 'pat@example.fr', 'MotDePasseValide123');
+  });
+
+  it('16. API client and App capture HTML 404, Pydantic 422 arrays, and missing tenant provisioning errors cleanly', async () => {
+    // 1. HTML 404 on /auth/register explains backend/proxy issue instead of generic "Erreur HTTP 404"
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response('<html><body>Not Found</body></html>', {
+        status: 404,
+        headers: { 'Content-Type': 'text/html' },
+      })
+    );
+
+    await expect(
+      apiClient.auth.register('Pat Noualhier', 'pat@example.fr', 'StrongPass123!')
+    ).rejects.toMatchObject({
+      status: 404,
+      detail: expect.stringMatching(/Service API backend introuvable \(HTTP 404/i),
+    });
+
+    // 2. FastAPI 422 array detail is formatted cleanly in French
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      jsonResponse(
+        {
+          detail: [
+            { loc: ['body', 'password'], msg: 'String should have at least 8 characters', type: 'string_too_short' },
+          ],
+        },
+        422
+      )
+    );
+
+    await expect(
+      apiClient.auth.register('Pat Noualhier', 'pat@example.fr', 'short')
+    ).rejects.toMatchObject({
+      status: 422,
+      detail: expect.stringMatching(/au moins 8 caractères/i),
+    });
+
+    // 3. App.handleRegister catches missing tenant provisioning after signup
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.endsWith('/billing/plans')) return jsonResponse([]);
+      if (url.endsWith('/auth/me') && !apiClient.getAccessToken()) {
+        return jsonResponse({ detail: 'Non authentifié' }, 401);
+      }
+      if (url.endsWith('/auth/refresh') && !apiClient.getAccessToken()) {
+        return jsonResponse({ detail: 'No refresh' }, 401);
+      }
+      if (url.endsWith('/auth/register')) {
+        return jsonResponse(
+          {
+            id: FIXTURE_USER.id,
+            email: FIXTURE_USER.email,
+            full_name: FIXTURE_USER.fullName,
+            is_active: true,
+            is_verified: true,
+            is_superuser: false,
+            created_at: FIXTURE_USER.createdAt,
+          },
+          201
+        );
+      }
+      if (url.endsWith('/auth/login')) {
+        return jsonResponse({
+          access_token: 'jwt-temp-no-tenant',
+          token_type: 'bearer',
+          expires_in: 1800,
+          user_id: FIXTURE_USER.id,
+          tenant_id: '',
+        });
+      }
+      if (url.endsWith('/auth/me')) {
+        return jsonResponse({
+          id: FIXTURE_USER.id,
+          email: FIXTURE_USER.email,
+          full_name: FIXTURE_USER.fullName,
+          is_active: true,
+          is_verified: true,
+          is_superuser: false,
+          created_at: FIXTURE_USER.createdAt,
+        });
+      }
+      if (url.endsWith('/tenants/my-tenants')) {
+        return jsonResponse([]);
+      }
+      return jsonResponse({}, 404);
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /Créer un compte/i })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /Créer un compte/i }));
+
+    fireEvent.change(screen.getByLabelText(/Nom complet/i), { target: { value: 'Pat Noualhier' } });
+    fireEvent.change(screen.getByLabelText(/Adresse e-mail/i), { target: { value: 'pat@example.fr' } });
+    fireEvent.change(screen.getByLabelText(/Mot de passe/i), { target: { value: 'StrongPass123!' } });
+    fireEvent.click(screen.getByRole('button', { name: /Créer mon espace/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        /aucun espace documentaire n'a pu être provisionné/i
+      );
+    });
+  });
 });
