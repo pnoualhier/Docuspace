@@ -2,17 +2,18 @@ import uuid
 from typing import List, Optional, Dict, Tuple, Set
 from uuid import UUID
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Path
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_, func, update
 from backend.app.models.document import Document, Folder, DocumentVersion
 from backend.app.models.share import Share
-from backend.app.models.audit import AuditLog
+from backend.app.models.audit import AuditLog, QuarantineEvent
 from backend.app.models.tenant import StorageUsage
 from backend.app.schemas.document import (
     DocumentRead, 
     DocumentUpdate,
     DocumentCopyRequest,
+    DocumentPreviewResponse,
     FolderRead, 
     FolderCreate, 
     FolderUpdate,
@@ -36,8 +37,9 @@ from backend.app.services.quota_service import (
     QuotaExceededError,
     FileSizeLimitExceededError,
 )
+from backend.app.security.antivirus import clamav_scanner, ScanResult, quarantine_manager
 from backend.app.storage.s3_storage import storage_client, StorageBackendError
-from backend.app.storage.upload_service import sanitize_filename
+from backend.app.storage.upload_service import sanitize_filename, stream_and_verify_upload
 from backend.app.middleware.tenant_context import (
     get_current_tenant_context, 
     TenantContext, 
@@ -138,18 +140,22 @@ def _delete_storage_keys_best_effort(keys: List[str]) -> None:
 async def list_folders(
     parent_id: Optional[UUID] = Query(None),
     is_trashed: bool = Query(False),
+    flat: bool = Query(False),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     ctx: TenantContext = Depends(require_permission(Permission.DOCUMENT_READ))
 ):
-    """Lists folders within the active tenant and parent directory (enforced by RLS)."""
+    """Lists folders within the active tenant and parent directory (or all folders when flat=true)."""
+    conditions = [
+        Folder.tenant_id == ctx.tenant.id,
+        Folder.is_trashed == is_trashed,
+    ]
+    if not flat:
+        conditions.append(Folder.parent_id == parent_id)
+
     stmt = (
         select(Folder)
-        .where(
-            Folder.tenant_id == ctx.tenant.id,
-            Folder.parent_id == parent_id,
-            Folder.is_trashed == is_trashed
-        )
+        .where(*conditions)
         .order_by(Folder.name.asc())
         .limit(limit)
         .offset(offset)
@@ -508,7 +514,7 @@ async def update_document(
     payload: DocumentUpdate = None,
     ctx: TenantContext = Depends(require_permission(Permission.DOCUMENT_WRITE))
 ):
-    """Renames document, moves to a folder, or toggles favorite status."""
+    """Renames document, moves to a folder (or root via folder_id=null), or toggles favorite status."""
     stmt = select(Document).where(
         Document.id == document_id,
         Document.tenant_id == ctx.tenant.id
@@ -518,27 +524,186 @@ async def update_document(
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document introuvable")
 
+    if payload is None:
+        return doc
+
     if payload.original_name is not None:
         doc.original_name = sanitize_filename(payload.original_name)
     if payload.is_favorite is not None:
         doc.is_favorite = payload.is_favorite
-    if payload.folder_id is not None:
-        # Verify folder belongs to same tenant
-        folder_check = await ctx.db.execute(
-            select(Folder).where(
-                Folder.id == payload.folder_id,
-                Folder.tenant_id == ctx.tenant.id,
-                Folder.is_trashed == False,
+    if "folder_id" in payload.model_fields_set:
+        if payload.folder_id is None:
+            doc.folder_id = None
+        else:
+            folder_check = await ctx.db.execute(
+                select(Folder).where(
+                    Folder.id == payload.folder_id,
+                    Folder.tenant_id == ctx.tenant.id,
+                    Folder.is_trashed == False,
+                )
             )
-        )
-        if not folder_check.scalar_one_or_none():
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier cible introuvable")
-        doc.folder_id = payload.folder_id
+            if not folder_check.scalar_one_or_none():
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier cible introuvable")
+            doc.folder_id = payload.folder_id
 
+    doc.updated_at = datetime.now(timezone.utc)
+    ctx.db.add(AuditLog(
+        tenant_id=ctx.tenant.id,
+        user_id=ctx.user.id,
+        action="DOC_UPDATE",
+        resource_type="DOCUMENT",
+        resource_id=doc.id,
+        details={"filename": doc.original_name, "folder_id": str(doc.folder_id) if doc.folder_id else None},
+    ))
     await ctx.db.flush()
     await ctx.db.refresh(doc)
     await ctx.db.commit()
     return doc
+
+
+@router.get("/documents/{document_id}/preview", response_model=DocumentPreviewResponse, tags=["Dossiers & Documents"])
+async def preview_document(
+    document_id: UUID = Path(...),
+    ctx: TenantContext = Depends(require_permission(Permission.DOCUMENT_READ)),
+):
+    """
+    Retrieves real document content or ephemeral presigned URL from MinIO S3 for secure preview.
+    Enforces strict Fail-Closed antivirus checks and XSS sanitization.
+    """
+    res = await ctx.db.execute(
+        select(Document).where(
+            Document.id == document_id,
+            Document.tenant_id == ctx.tenant.id,
+            Document.is_trashed == False,
+        )
+    )
+    doc = res.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document introuvable")
+
+    if doc.antivirus_status == "INFECTED" or doc.status == "QUARANTINED":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Aperçu strictement interdit : ce fichier est infecté et placé en quarantaine.",
+        )
+    if doc.antivirus_status != "CLEAN" or doc.status != "READY":
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail=f"Aperçu bloqué (Fail-Closed) : le fichier n'est pas certifié sain ({doc.antivirus_status}).",
+        )
+
+    ext = (doc.extension or "").lower().lstrip(".")
+    mime = (doc.mime_type or "").lower()
+
+    if mime in ("image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp", "application/pdf") or ext in ("png", "jpg", "jpeg", "gif", "webp", "pdf"):
+        try:
+            url = storage_client.generate_presigned_download_url(
+                storage_key=doc.storage_key,
+                filename=doc.original_name,
+                expires_in=300,
+            )
+        except StorageBackendError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Stockage S3/MinIO indisponible : {exc}")
+        ctx.db.add(AuditLog(
+            tenant_id=ctx.tenant.id,
+            user_id=ctx.user.id,
+            action="DOC_PREVIEW",
+            resource_type="DOCUMENT",
+            resource_id=doc.id,
+            details={"mode": "binary_url", "mime_type": doc.mime_type},
+        ))
+        await ctx.db.commit()
+        return DocumentPreviewResponse(
+            document_id=doc.id,
+            original_name=doc.original_name,
+            mime_type=doc.mime_type,
+            extension=doc.extension,
+            size_bytes=doc.size_bytes,
+            mode="binary_url",
+            download_url=url,
+        )
+
+    text_exts = {"txt", "json", "xml", "yaml", "yml", "log", "py", "ts", "tsx", "js", "jsx", "css", "html", "sql", "sh", "ini", "conf", "env"}
+    is_svg = mime == "image/svg+xml" or ext == "svg"
+    is_csv = mime in ("text/csv", "text/tab-separated-values") or ext in ("csv", "tsv")
+    is_md = mime == "text/markdown" or ext in ("md", "markdown")
+    is_text = mime.startswith("text/") or mime in ("application/json", "application/xml") or ext in text_exts
+
+    if not (is_svg or is_csv or is_md or is_text):
+        return DocumentPreviewResponse(
+            document_id=doc.id,
+            original_name=doc.original_name,
+            mime_type=doc.mime_type,
+            extension=doc.extension,
+            size_bytes=doc.size_bytes,
+            mode="unsupported",
+            message="Aucun moteur de prévisualisation intégré pour ce format binaire. Utilisez le téléchargement sécurisé.",
+        )
+
+    try:
+        raw_bytes = storage_client.get_object(doc.storage_key)
+    except FileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Objet introuvable sur le stockage S3/MinIO.")
+    except StorageBackendError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Erreur d'accès S3/MinIO : {exc}")
+
+    try:
+        decoded = raw_bytes[:524288].decode("utf-8")
+    except UnicodeDecodeError:
+        decoded = raw_bytes[:524288].decode("latin-1", errors="replace")
+
+    ctx.db.add(AuditLog(
+        tenant_id=ctx.tenant.id,
+        user_id=ctx.user.id,
+        action="DOC_PREVIEW",
+        resource_type="DOCUMENT",
+        resource_id=doc.id,
+        details={"mode": "svg" if is_svg else "csv" if is_csv else "markdown" if is_md else "text"},
+    ))
+    await ctx.db.commit()
+
+    if is_svg:
+        return DocumentPreviewResponse(
+            document_id=doc.id,
+            original_name=doc.original_name,
+            mime_type=doc.mime_type,
+            extension=doc.extension,
+            size_bytes=doc.size_bytes,
+            mode="svg",
+            svg_content=preview_service.sanitize_svg(decoded),
+        )
+    if is_csv:
+        delimiter = "\t" if ext == "tsv" else None
+        return DocumentPreviewResponse(
+            document_id=doc.id,
+            original_name=doc.original_name,
+            mime_type=doc.mime_type,
+            extension=doc.extension,
+            size_bytes=doc.size_bytes,
+            mode="csv",
+            csv_data=preview_service.parse_csv(decoded, delimiter=delimiter),
+        )
+    if is_md:
+        return DocumentPreviewResponse(
+            document_id=doc.id,
+            original_name=doc.original_name,
+            mime_type=doc.mime_type,
+            extension=doc.extension,
+            size_bytes=doc.size_bytes,
+            mode="markdown",
+            text_content=decoded,
+            html_content=preview_service.render_markdown_safe(decoded),
+        )
+
+    return DocumentPreviewResponse(
+        document_id=doc.id,
+        original_name=doc.original_name,
+        mime_type=doc.mime_type,
+        extension=doc.extension,
+        size_bytes=doc.size_bytes,
+        mode="text",
+        text_content=decoded,
+    )
 
 @router.post("/documents/{document_id}/copy", response_model=DocumentRead, tags=["Dossiers & Documents"])
 async def copy_document(
@@ -1013,6 +1178,186 @@ async def create_document_version(
     await ctx.db.flush()
     await ctx.db.refresh(new_version)
     await ctx.db.commit()
+
+    if evicted_storage_key:
+        _delete_storage_keys_best_effort([evicted_storage_key])
+
+    return new_version
+
+
+@router.post("/documents/{id}/versions/upload", response_model=VersionRead, status_code=status.HTTP_201_CREATED, tags=["Versions & Révisions"])
+async def upload_document_version(
+    id: UUID = Path(...),
+    file: UploadFile = File(...),
+    change_summary: Optional[str] = Form(None),
+    ctx: TenantContext = Depends(require_permission(Permission.DOCUMENT_WRITE)),
+):
+    """
+    Téléverse réellement une nouvelle révision binaire d'un document existant :
+    - Streaming par blocs, vérification magic-bytes & SHA-256
+    - Contrôle quota & limite unitaire selon Plan
+    - Analyse antivirus ClamAV stricte (Fail-Closed + Quarantaine)
+    - Stockage MinIO & éviction de l'ancienne version si plafond atteint
+    """
+    doc_q = await ctx.db.execute(
+        select(Document).where(
+            Document.id == id,
+            Document.tenant_id == ctx.tenant.id,
+            Document.is_trashed == False,
+        )
+    )
+    doc = doc_q.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document actif introuvable.")
+
+    storage_usage, plan = await quota_service.get_or_create_db_usage(ctx.db, ctx.tenant.id)
+    content, sha256_hash, file_size, real_mime = await stream_and_verify_upload(
+        file=file,
+        max_allowed_bytes=plan.max_storage_bytes,
+    )
+
+    if file_size > plan.max_file_size_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Cette révision dépasse la taille maximale autorisée par votre forfait ({plan.max_file_size_bytes} octets).",
+        )
+
+    # Scan ClamAV before mutating versions or MinIO
+    scan_result: ScanResult = clamav_scanner.scan_bytes(content)
+    if not scan_result.is_clean:
+        if scan_result.status == "INFECTED":
+            q_rec = quarantine_manager.quarantine_file(
+                storage_client=storage_client,
+                tenant_id=ctx.tenant.id,
+                storage_key="",
+                original_name=sanitize_filename(file.filename or doc.original_name),
+                threat_name=scan_result.threat_name or "Menace détectée",
+                content=content,
+            )
+            ctx.db.add(QuarantineEvent(
+                tenant_id=ctx.tenant.id,
+                user_id=ctx.user.id,
+                original_name=sanitize_filename(file.filename or doc.original_name),
+                threat_name=scan_result.threat_name or "Menace détectée",
+                quarantine_key=q_rec.get("quarantine_key", ""),
+                size_bytes=file_size,
+                status="QUARANTINED",
+            ))
+            ctx.db.add(AuditLog(
+                tenant_id=ctx.tenant.id,
+                user_id=ctx.user.id,
+                action="AV_THREAT_QUARANTINED",
+                resource_type="DOCUMENT_VERSION",
+                resource_id=doc.id,
+                details={"filename": doc.original_name, "threat_name": scan_result.threat_name},
+            ))
+            await ctx.db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Alerte ClamAV : {scan_result.threat_name or 'Menace détectée'}. Version rejetée et placée en quarantaine.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Échec de l'analyse antivirus (Fail-Closed) : {scan_result.details}",
+        )
+
+    max_ver_q = await ctx.db.execute(
+        select(func.coalesce(func.max(DocumentVersion.version_number), 0))
+        .where(DocumentVersion.document_id == id)
+    )
+    current_max_ver = max_ver_q.scalar() or 0
+    next_ver = current_max_ver + 1
+
+    max_allowed = max(1, int(getattr(plan, "max_versions_per_file", 5) or 5))
+    total_versions_q = await ctx.db.execute(
+        select(func.count(DocumentVersion.id)).where(DocumentVersion.document_id == id)
+    )
+    total_versions = total_versions_q.scalar() or 0
+
+    reclaimed_from_oldest = 0
+    evicted_storage_key: Optional[str] = None
+    oldest_to_delete: Optional[DocumentVersion] = None
+    if total_versions >= max_allowed:
+        oldest_ver_q = await ctx.db.execute(
+            select(DocumentVersion).where(
+                DocumentVersion.document_id == id
+            ).order_by(DocumentVersion.version_number.asc()).limit(1)
+        )
+        oldest = oldest_ver_q.scalar_one_or_none()
+        if oldest and oldest.version_number < current_max_ver:
+            reclaimed_from_oldest = oldest.size_bytes
+            if oldest.storage_key != doc.storage_key:
+                evicted_storage_key = oldest.storage_key
+            oldest_to_delete = oldest
+
+    projected_used = storage_usage.used_bytes + storage_usage.reserved_bytes - reclaimed_from_oldest + file_size
+    if projected_used > plan.max_storage_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Quota de stockage dépassé pour l'ajout de cette nouvelle version.",
+        )
+
+    storage_key = (
+        f"tenants/{ctx.tenant.id}/{doc.id}_v{next_ver}_{uuid.uuid4().hex[:8]}.{doc.extension}"
+        if doc.extension else f"tenants/{ctx.tenant.id}/{doc.id}_v{next_ver}_{uuid.uuid4().hex[:8]}"
+    )
+
+    try:
+        storage_client.put_object(storage_key, content, real_mime)
+    except StorageBackendError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Échec du stockage objet S3/MinIO : {exc}",
+        )
+
+    if oldest_to_delete is not None:
+        await ctx.db.delete(oldest_to_delete)
+
+    new_version = DocumentVersion(
+        id=uuid.uuid4(),
+        document_id=doc.id,
+        tenant_id=ctx.tenant.id,
+        version_number=next_ver,
+        storage_key=storage_key,
+        size_bytes=file_size,
+        mime_type=real_mime,
+        sha256_hash=sha256_hash,
+        change_summary=(change_summary or "Nouvelle révision téléversée").strip()[:255],
+        created_by=ctx.user.id,
+    )
+
+    doc.size_bytes = file_size
+    doc.sha256_hash = sha256_hash
+    doc.mime_type = real_mime
+    doc.storage_key = storage_key
+    doc.antivirus_status = scan_result.status
+    doc.antivirus_details = scan_result.details
+    doc.updated_at = datetime.now(timezone.utc)
+
+    storage_usage.used_bytes = max(0, storage_usage.used_bytes - reclaimed_from_oldest + file_size)
+    storage_usage.updated_at = datetime.now(timezone.utc)
+
+    ctx.db.add(new_version)
+    ctx.db.add(AuditLog(
+        tenant_id=ctx.tenant.id,
+        user_id=ctx.user.id,
+        action="DOC_VERSION_UPLOAD",
+        resource_type="DOCUMENT",
+        resource_id=doc.id,
+        details={"version_number": next_ver, "size_bytes": file_size},
+    ))
+
+    try:
+        await ctx.db.flush()
+        await ctx.db.refresh(new_version)
+        await ctx.db.commit()
+    except Exception:
+        _delete_storage_keys_best_effort([storage_key])
+        await ctx.db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de l'enregistrement de la nouvelle version en base.",
+        )
 
     if evicted_storage_key:
         _delete_storage_keys_best_effort([evicted_storage_key])

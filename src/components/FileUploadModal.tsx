@@ -10,7 +10,8 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import { Plan, Tenant, DocumentItem, Folder } from '../types';
-import { calculateSHA256, formatBytes, generateStorageKey } from '../services/crypto';
+import { formatBytes } from '../services/crypto';
+import { apiClient, ApiDocument } from '../services/api';
 
 interface FileUploadModalProps {
   isOpen: boolean;
@@ -31,6 +32,28 @@ const PROHIBITED_EXTS = [
   '.msi', '.dll', '.com', '.scr', '.sys', '.bin', '.elf',
   '.jar', '.deb', '.rpm', '.dmg', '.pkg', '.appimage',
 ];
+
+const mapUploadedDoc = (d: ApiDocument): DocumentItem => ({
+  id: d.id,
+  tenantId: d.tenant_id,
+  folderId: d.folder_id,
+  originalName: d.original_name,
+  storageKey: d.storage_key,
+  mimeType: d.mime_type,
+  extension: d.extension,
+  sizeBytes: d.size_bytes,
+  sha256Hash: d.sha256_hash,
+  status: (d.status as DocumentItem['status']) || 'READY',
+  antivirusStatus: (d.antivirus_status as DocumentItem['antivirusStatus']) || 'CLEAN',
+  antivirusDetails: d.antivirus_details,
+  isFavorite: d.is_favorite,
+  isTrashed: d.is_trashed,
+  trashedAt: d.trashed_at || null,
+  createdBy: d.created_by || '',
+  createdAt: d.created_at,
+  updatedAt: d.updated_at,
+  versions: [],
+});
 
 export const FileUploadModal: React.FC<FileUploadModalProps> = ({
   isOpen,
@@ -84,7 +107,6 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
     if (PROHIBITED_EXTS.some((ext) => lower.endsWith(ext))) {
       return 'Fichier rejeté : les extensions exécutables ou scripts (.exe, .sh, .bat, .dll, etc.) sont strictement interdites.';
     }
-    // Double-extension masquerading check (e.g., document.exe.pdf)
     const parts = lower.split('.');
     if (parts.length > 2) {
       const middleExts = parts.slice(1, -1).map((p) => `.${p}`);
@@ -98,6 +120,14 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
   const handleFileSelected = (file: File) => {
     setErrorMsg(null);
     setUploadProgress(0);
+
+    if (currentTenant.isRestrictedReadOnly) {
+      setErrorMsg(
+        'Votre espace est en lecture seule suite à un dépassement de quota. Libérez du stockage avant d’importer.'
+      );
+      setSelectedFile(null);
+      return;
+    }
 
     const filenameError = hasDangerousFilename(file.name);
     if (filenameError) {
@@ -121,9 +151,10 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
     }
 
     const used = currentTenant.usedBytes || 0;
-    if (used + file.size > currentPlan.maxStorageBytes) {
+    const maxStorage = currentTenant.maxStorageBytes || currentPlan.maxStorageBytes;
+    if (used + file.size > maxStorage) {
       setErrorMsg(
-        `Espace de stockage insuffisant. L'ajout de ce fichier (${formatBytes(file.size)}) dépasserait la limite de votre forfait (${formatBytes(currentPlan.maxStorageBytes)}).`
+        `Espace de stockage insuffisant. L'ajout de ce fichier (${formatBytes(file.size)}) dépasserait la limite de votre forfait (${formatBytes(maxStorage)}).`
       );
       setSelectedFile(null);
       return;
@@ -149,96 +180,41 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
     setIsProcessing(true);
     setErrorMsg(null);
     setUploadProgress(5);
+    setUploadStep('Transfert sécurisé et analyse antivirus ClamAV côté serveur...');
 
     try {
-      if (onUploadToApi) {
-        setUploadStep('Transfert sécurisé et analyse antivirus ClamAV côté serveur...');
-        const uploadedDoc = await onUploadToApi(
-          selectedFile,
-          currentFolder ? currentFolder.id : null,
-          (pct) => {
-            setUploadProgress(pct);
-            if (pct >= 100) {
-              setUploadStep('Finalisation du scan ClamAV et persistance PostgreSQL / MinIO...');
-            }
+      const uploader =
+        onUploadToApi ||
+        (async (file: File, folderId: string | null, onProgress: (pct: number) => void) => {
+          const uploaded = await apiClient.storage.uploadWithProgress(
+            currentTenant.id,
+            file,
+            folderId,
+            onProgress
+          );
+          return mapUploadedDoc(uploaded);
+        });
+
+      const uploadedDoc = await uploader(
+        selectedFile,
+        currentFolder ? currentFolder.id : null,
+        (pct) => {
+          setUploadProgress(pct);
+          if (pct >= 100) {
+            setUploadStep('Finalisation du scan ClamAV et persistance PostgreSQL / MinIO...');
           }
-        );
-        setUploadProgress(100);
-        onUploadSuccess(uploadedDoc);
-        onClose();
-        return;
-      }
-
-      // Local WebCrypto preview pipeline (when running offline without backend session)
-      setUploadStep('Étape 1/3 : Calcul de l’empreinte cryptographique SHA-256...');
-      const sha256 = await calculateSHA256(selectedFile);
-      setUploadProgress(35);
-
-      const fileText = await selectedFile.text().catch(() => '');
-      const isEicarInfected = fileText.includes('EICAR-STANDARD-ANTIVIRUS-TEST-FILE');
-
-      setUploadStep('Étape 2/3 : Préparation du transfert vers MinIO S3...');
-      await new Promise((r) => setTimeout(r, 250));
-      setUploadProgress(70);
-
-      setUploadStep('Étape 3/3 : Analyse antivirus ClamAV en flux (Fail-Closed)...');
-      await new Promise((r) => setTimeout(r, 250));
-
-      if (isEicarInfected) {
-        throw new Error(
-          "Alerte de sécurité ClamAV : Signature 'EICAR.Test.File-FOUND' détectée ! Le fichier a été immédiatement rejeté, supprimé du stockage et placé en quarantaine."
-        );
-      }
+        }
+      );
 
       setUploadProgress(100);
-      const ext = selectedFile.name.split('.').pop() || 'bin';
-      const storageKey = generateStorageKey(currentTenant.id, ext);
-
-      let previewText: string | undefined = undefined;
-      if (selectedFile.type.startsWith('text/') || ['csv', 'md', 'json', 'xml'].includes(ext)) {
-        previewText = fileText;
-      }
-
-      const docId = `doc-${crypto.randomUUID()}`;
-      const newDoc: DocumentItem = {
-        id: docId,
-        tenantId: currentTenant.id,
-        folderId: currentFolder ? currentFolder.id : null,
-        originalName: selectedFile.name,
-        storageKey,
-        mimeType: selectedFile.type || 'application/octet-stream',
-        extension: ext,
-        sizeBytes: selectedFile.size,
-        sha256Hash: sha256,
-        status: 'READY',
-        antivirusStatus: 'CLEAN',
-        isFavorite: false,
-        isTrashed: false,
-        createdBy: currentTenant.ownerId,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        versions: [
-          {
-            id: `ver-${crypto.randomUUID()}`,
-            documentId: docId,
-            versionNumber: 1,
-            storageKey,
-            sizeBytes: selectedFile.size,
-            mimeType: selectedFile.type || 'application/octet-stream',
-            sha256Hash: sha256,
-            changeSummary: 'Version initiale importée',
-            createdAt: new Date().toISOString(),
-          },
-        ],
-        contentPreview:
-          previewText ||
-          `Document : ${selectedFile.name}\nTaille : ${formatBytes(selectedFile.size)}\nSHA-256 : ${sha256}`,
-      };
-
-      onUploadSuccess(newDoc);
+      setSelectedFile(null);
+      onUploadSuccess(uploadedDoc);
       onClose();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Une erreur est survenue lors de l’analyse ou du transfert.';
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Une erreur est survenue lors de l’analyse ou du transfert.';
       setErrorMsg(msg);
       setUploadProgress(0);
     } finally {
@@ -343,7 +319,7 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
         <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-400">
           <div className="flex items-center space-x-1.5 p-2 rounded-lg bg-slate-950/60 border border-slate-800/80">
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-            <span>Scan ClamAV en flux</span>
+            <span>Scan ClamAV côté serveur</span>
           </div>
           <div className="flex items-center space-x-1.5 p-2 rounded-lg bg-slate-950/60 border border-slate-800/80">
             <Lock className="w-3.5 h-3.5 text-sky-400 shrink-0" />
@@ -351,11 +327,11 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
           </div>
         </div>
 
-        {/* Antivirus Live Test */}
+        {/* Real server-side EICAR test */}
         <div className="flex items-center justify-between p-2.5 rounded-xl bg-slate-950/80 border border-slate-800 text-xs">
           <div className="flex items-center space-x-2 text-slate-400 text-[11px]">
             <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
-            <span>Tester la détection ClamAV :</span>
+            <span>Tester le rejet ClamAV serveur :</span>
           </div>
           <button
             type="button"
@@ -363,11 +339,10 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
             disabled={isProcessing}
             className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/20 text-[11px] font-medium whitespace-nowrap transition-colors"
           >
-            Injecter fichier test EICAR
+            Préparer fichier EICAR
           </button>
         </div>
 
-        {/* Processing progress */}
         {isProcessing && (
           <div
             aria-live="polite"
@@ -401,7 +376,7 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
           </button>
           <button
             type="button"
-            onClick={processUpload}
+            onClick={() => void processUpload()}
             disabled={!selectedFile || isProcessing}
             className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold text-xs flex items-center space-x-2 transition-colors whitespace-nowrap"
           >

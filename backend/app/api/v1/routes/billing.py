@@ -79,6 +79,43 @@ async def create_checkout(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/invoices")
+async def list_tenant_invoices(
+    ctx: TenantContext = Depends(require_permission(Permission.DOCUMENT_READ)),
+):
+    """
+    Return real persisted subscription/billing events from PostgreSQL AuditLog for the active tenant.
+    Never returns fabricated invoices.
+    """
+    rows = (
+        await ctx.db.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.tenant_id == ctx.tenant.id,
+                AuditLog.action.in_(["BILLING_WEBHOOK_PROCESSED", "ADMIN_PLAN_OVERRIDE"]),
+            )
+            .order_by(AuditLog.created_at.desc())
+            .limit(50)
+        )
+    ).scalars().all()
+
+    invoices = []
+    for row in rows:
+        details = row.details or {}
+        plan_id = details.get("new_plan") or ctx.tenant.plan_id
+        cat = PLAN_CATALOG.get(plan_id, {})
+        invoices.append({
+            "id": str(row.id),
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "event_type": details.get("event_type", row.action),
+            "plan_id": plan_id,
+            "plan_name": cat.get("name", plan_id),
+            "amount_eur": cat.get("price_monthly", 0.0) if details.get("subscription_status", "ACTIVE") == "ACTIVE" else 0.0,
+            "status": details.get("subscription_status", "ACTIVE"),
+        })
+    return invoices
+
+
 @router.post("/webhook", response_model=WebhookResponse)
 async def stripe_webhook(
     request: Request,

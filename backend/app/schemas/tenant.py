@@ -32,6 +32,8 @@ class TenantRead(BaseModel):
     owner_id: UUID
     plan_id: str
     role: str
+    subscription_status: str = "ACTIVE"
+    restricted_read_only: bool = False
     is_active: bool
     created_at: datetime
     storage_usage: Optional[StorageUsageRead] = None

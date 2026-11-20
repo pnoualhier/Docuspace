@@ -1,118 +1,160 @@
-import React, { useState } from 'react';
-import { 
-  X, 
-  Settings, 
-  Download, 
-  Smartphone, 
-  Trash2, 
-  ShieldCheck, 
-  AlertTriangle, 
-  CheckCircle2, 
-  Laptop, 
-  Lock,
-  Database,
-  Archive,
-  RotateCcw,
-  Clock,
-  HardDrive
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  X,
+  Settings,
+  Download,
+  Smartphone,
+  ShieldCheck,
+  AlertTriangle,
+  Laptop,
+  Loader2,
+  LogOut,
 } from 'lucide-react';
-import { User, Tenant, DocumentItem, SessionInfo } from '../types';
-import { INITIAL_SESSIONS } from '../services/mockData';
-import { formatBytes } from '../services/crypto';
+import { User, Tenant, SessionInfo } from '../types';
+import { apiClient, ApiError } from '../services/api';
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   currentUser: User;
   currentTenant: Tenant;
-  documents: DocumentItem[];
-  onDeleteAccount: () => void;
+  onDeleteAccount: () => Promise<void> | void;
+  onAllSessionsRevoked?: () => void;
 }
+
+const parseUserAgent = (ua: string | null): { device: string; browser: string; isMobile: boolean } => {
+  if (!ua) {
+    return { device: 'Appareil inconnu', browser: 'Navigateur inconnu', isMobile: false };
+  }
+  const isMobile = /iPhone|Android|Mobile|iPad/i.test(ua);
+  const device = /iPhone/i.test(ua)
+    ? 'iPhone'
+    : /iPad/i.test(ua)
+      ? 'iPad'
+      : /Android/i.test(ua)
+        ? 'Android'
+        : /Mac OS X|Macintosh/i.test(ua)
+          ? 'macOS'
+          : /Windows/i.test(ua)
+            ? 'Windows'
+            : /Linux/i.test(ua)
+              ? 'Linux'
+              : 'Poste de travail';
+  const browser = /Firefox/i.test(ua)
+    ? 'Firefox'
+    : /Edg\//i.test(ua)
+      ? 'Edge'
+      : /Chrome/i.test(ua)
+        ? 'Chrome'
+        : /Safari/i.test(ua)
+          ? 'Safari'
+          : 'Client HTTP';
+  return { device, browser, isMobile };
+};
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
   currentUser,
-  currentTenant,
-  documents,
   onDeleteAccount,
+  onAllSessionsRevoked,
 }) => {
-  const [activeTab, setActiveTab] = useState<'rgpd' | 'backups' | 'sessions' | 'security'>('rgpd');
-  const [sessions, setSessions] = useState<SessionInfo[]>(INITIAL_SESSIONS);
+  const [activeTab, setActiveTab] = useState<'rgpd' | 'sessions' | 'security'>('rgpd');
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteInput, setDeleteInput] = useState('');
-  const [drillStatus, setDrillStatus] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const loadSessions = useCallback(async () => {
+    setIsLoadingSessions(true);
+    setErrorMsg(null);
+    try {
+      const apiSessions = await apiClient.auth.sessions();
+      setSessions(
+        apiSessions.map((s) => ({
+          id: s.id,
+          userAgent: s.user_agent,
+          ipAddress: s.ip_address,
+          isRevoked: s.is_revoked,
+          isCurrent: s.is_current,
+          expiresAt: s.expires_at,
+          createdAt: s.created_at,
+          lastActiveAt: s.last_active_at,
+        }))
+      );
+    } catch (err: unknown) {
+      setErrorMsg(
+        err instanceof ApiError ? err.detail : 'Impossible de charger les sessions actives.'
+      );
+    } finally {
+      setIsLoadingSessions(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isOpen) {
+      void loadSessions();
+    }
+  }, [isOpen, loadSessions]);
 
   if (!isOpen) return null;
 
-  // GDPR Article 20 Complete Data Portability Export
-  const handleExportData = () => {
-    const exportBundle = {
-      gdprCompliance: {
-        standard: 'General Data Protection Regulation (EU 2016/679)',
-        article: 'Article 20 - Droit à la portabilité des données',
-        exportDate: new Date().toISOString(),
-        controller: 'DocuSpace Platform (Debian Self-Hosted / SaaS)',
-        userSubject: currentUser.email
-      },
-      user: {
-        id: currentUser.id,
-        email: currentUser.email,
-        fullName: currentUser.fullName,
-        isVerified: currentUser.isVerified,
-        createdAt: currentUser.createdAt
-      },
-      activeTenant: {
-        id: currentTenant.id,
-        name: currentTenant.name,
-        planId: currentTenant.planId,
-        usedBytes: currentTenant.usedBytes,
-        documentCount: currentTenant.documentCount,
-        role: currentTenant.role
-      },
-      documents: documents.map(d => ({
-        id: d.id,
-        originalName: d.originalName,
-        mimeType: d.mimeType,
-        extension: d.extension,
-        sizeBytes: d.sizeBytes,
-        sha256Hash: d.sha256Hash,
-        status: d.status,
-        antivirusStatus: d.antivirusStatus,
-        createdAt: d.createdAt,
-        updatedAt: d.updatedAt,
-        versionsCount: d.versions.length,
-        versions: d.versions.map(v => ({
-          versionNumber: v.versionNumber,
-          sizeBytes: v.sizeBytes,
-          sha256Hash: v.sha256Hash,
-          changeSummary: v.changeSummary,
-          createdAt: v.createdAt
-        }))
-      }))
-    };
-
-    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(exportBundle, null, 2));
-    const dlAnchorElem = document.createElement('a');
-    dlAnchorElem.setAttribute('href', dataStr);
-    dlAnchorElem.setAttribute('download', `docuspace_gdpr_export_${currentUser.id}.json`);
-    dlAnchorElem.click();
+  const handleExportData = async () => {
+    setIsExporting(true);
+    setErrorMsg(null);
+    try {
+      const blob = await apiClient.gdpr.exportData();
+      const url = URL.createObjectURL(blob);
+      const dlAnchorElem = window.document.createElement('a');
+      dlAnchorElem.href = url;
+      dlAnchorElem.download = `docuspace_gdpr_export_${currentUser.id}.json`;
+      dlAnchorElem.click();
+      URL.revokeObjectURL(url);
+    } catch (err: unknown) {
+      setErrorMsg(
+        err instanceof ApiError ? err.detail : "Erreur lors de l'export RGPD côté serveur."
+      );
+    } finally {
+      setIsExporting(false);
+    }
   };
 
-  const handleSimulateDisasterRecoveryDrill = () => {
-    setDrillStatus('Calcul des empreintes SHA-256 du snapshot PostgreSQL & S3...');
-    setTimeout(() => {
-      setDrillStatus('Validation des contraintes RLS et restauration de test réussie (100% Intègre).');
-      setTimeout(() => setDrillStatus(null), 4000);
-    }, 1500);
+  const handleRevokeSession = async (sessionId: string) => {
+    setErrorMsg(null);
+    try {
+      await apiClient.auth.revokeSession(sessionId);
+      setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    } catch (err: unknown) {
+      setErrorMsg(
+        err instanceof ApiError ? err.detail : 'Impossible de révoquer cette session.'
+      );
+    }
   };
 
-  const handleRevokeSession = (sessionId: string) => {
-    setSessions(sessions.filter(s => s.id !== sessionId));
+  const handleRevokeAllSessions = async () => {
+    setErrorMsg(null);
+    try {
+      await apiClient.auth.revokeAllSessions();
+      setSessions([]);
+      if (onAllSessionsRevoked) {
+        onAllSessionsRevoked();
+      }
+    } catch (err: unknown) {
+      setErrorMsg(
+        err instanceof ApiError ? err.detail : 'Impossible de révoquer toutes les sessions.'
+      );
+    }
   };
 
   return (
-    <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-in fade-in">
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-in fade-in"
+    >
       <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-2xl p-6 space-y-6 shadow-2xl">
         {/* Header */}
         <div className="flex items-center justify-between">
@@ -121,14 +163,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <Settings className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-sm font-bold text-white">Paramètres, RGPD & Continuité</h3>
+              <h3 className="text-sm font-bold text-white">Paramètres, RGPD & Sessions</h3>
               <p className="text-[11px] text-slate-400">
-                Souveraineté des données, sauvegardes automatisées, sessions et purge de compte.
+                Souveraineté des données, révocation de sessions et suppression du compte.
               </p>
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
+            aria-label="Fermer les paramètres"
             className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
           >
             <X className="w-4 h-4" />
@@ -138,38 +182,46 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Tab Switcher */}
         <div className="flex border-b border-slate-800 overflow-x-auto text-xs">
           <button
+            type="button"
             onClick={() => setActiveTab('rgpd')}
             className={`pb-2.5 px-4 font-semibold border-b-2 transition-all shrink-0 ${
-              activeTab === 'rgpd' ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-400 hover:text-slate-200'
+              activeTab === 'rgpd'
+                ? 'border-blue-500 text-blue-400'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
             Données & Portabilité RGPD
           </button>
           <button
-            onClick={() => setActiveTab('backups')}
-            className={`pb-2.5 px-4 font-semibold border-b-2 transition-all shrink-0 ${
-              activeTab === 'backups' ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            Sauvegardes Debian (14j)
-          </button>
-          <button
+            type="button"
             onClick={() => setActiveTab('sessions')}
             className={`pb-2.5 px-4 font-semibold border-b-2 transition-all shrink-0 ${
-              activeTab === 'sessions' ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-400 hover:text-slate-200'
+              activeTab === 'sessions'
+                ? 'border-blue-500 text-blue-400'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
             Sessions ({sessions.length})
           </button>
           <button
+            type="button"
             onClick={() => setActiveTab('security')}
             className={`pb-2.5 px-4 font-semibold border-b-2 transition-all shrink-0 ${
-              activeTab === 'security' ? 'border-rose-500 text-rose-400' : 'border-transparent text-slate-400 hover:text-slate-200'
+              activeTab === 'security'
+                ? 'border-rose-500 text-rose-400'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
             Zone de danger (Art. 17)
           </button>
         </div>
+
+        {errorMsg && (
+          <div role="alert" className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-start space-x-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>{errorMsg}</span>
+          </div>
+        )}
 
         {/* Tab 1: RGPD Data Export */}
         {activeTab === 'rgpd' && (
@@ -180,123 +232,112 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <span>Droit à la portabilité des données (Art. 20 RGPD)</span>
               </h4>
               <p className="text-slate-400 leading-relaxed text-[11px]">
-                Vous pouvez exporter et télécharger l'ensemble de vos documents, versions antérieures, métadonnées, hachages cryptographiques SHA-256 et partages actifs dans une archive standardisée lisible par machine (JSON).
+                Téléchargez l'export complet généré par le serveur PostgreSQL contenant votre profil, vos espaces, documents, versions, partages et journaux d'audit.
               </p>
               <div className="pt-2">
                 <button
+                  type="button"
+                  disabled={isExporting}
                   onClick={handleExportData}
-                  className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs flex items-center space-x-2 shadow-sm transition-colors"
+                  className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-semibold text-xs flex items-center space-x-2 shadow-sm transition-colors"
                 >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>Télécharger mon archive personnelle complète (.JSON)</span>
+                  {isExporting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                  <span>
+                    {isExporting
+                      ? 'Génération de l’export...'
+                      : 'Télécharger mon archive personnelle complète (.JSON)'}
+                  </span>
                 </button>
               </div>
             </div>
 
             <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-1 text-[11px] text-slate-400">
-              <div className="font-semibold text-slate-300">Garanties de conformité légale :</div>
-              <p>• Droit d'accès et de rectification garanti sans restriction technique.</p>
-              <p>• Rétention de la corbeille limitée à 30 jours calendaires avant purge automatique irréversible.</p>
-              <p>• Zéro journalisation de mots de passe en clair dans la base PostgreSQL ou les fichiers de logs.</p>
+              <div className="font-semibold text-slate-300">Garanties de conformité :</div>
+              <p>• Droit d'accès, de portabilité et d'effacement exécutés côté serveur.</p>
+              <p>• Rétention de la corbeille limitée à 30 jours avant purge.</p>
+              <p>• Hachage Argon2id des mots de passe et empreintes SHA-256 des jetons.</p>
             </div>
           </div>
         )}
 
-        {/* Tab 2: Backups & Disaster Recovery */}
-        {activeTab === 'backups' && (
-          <div className="space-y-4 text-xs">
-            <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-white flex items-center space-x-2">
-                  <Database className="w-4 h-4 text-purple-400" />
-                  <span>Sauvegardes Système Automatisées (Debian 12)</span>
-                </span>
-                <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 text-[10px] font-semibold border border-emerald-500/20">
-                  Rétention 14 jours
-                </span>
-              </div>
-              <p className="text-slate-400 leading-relaxed text-[11px]">
-                Chaque nuit à 02h00, un instantané compressé de la base PostgreSQL (`pg_dump`) et des objets MinIO S3 est généré dans `/var/backups/docuspace` avec vérification d'intégrité par fichier `SHA256SUMS`.
-              </p>
-
-              <div className="grid grid-cols-2 gap-3 pt-1">
-                <div className="p-3 rounded-lg bg-slate-900 border border-slate-800">
-                  <div className="text-[10px] text-slate-500 uppercase font-bold">Dernière sauvegarde</div>
-                  <div className="text-xs font-semibold text-white mt-0.5">Aujourd'hui à 02:00 UTC</div>
-                  <div className="text-[10px] text-emerald-400 font-mono mt-0.5">SHA-256 Validé</div>
-                </div>
-                <div className="p-3 rounded-lg bg-slate-900 border border-slate-800">
-                  <div className="text-[10px] text-slate-500 uppercase font-bold">Rotation active</div>
-                  <div className="text-xs font-semibold text-white mt-0.5">14 archives conservées</div>
-                  <div className="text-[10px] text-slate-400 font-mono mt-0.5">Purge auto &gt; 14 jours</div>
-                </div>
-              </div>
-
-              <div className="pt-2">
+        {/* Tab 2: Active Sessions */}
+        {activeTab === 'sessions' && (
+          <div className="space-y-3 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Appareils connectés à votre compte
+              </span>
+              {sessions.length > 0 && (
                 <button
-                  onClick={handleSimulateDisasterRecoveryDrill}
-                  disabled={drillStatus !== null}
-                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs flex items-center space-x-2 transition-colors border border-slate-700"
+                  type="button"
+                  onClick={handleRevokeAllSessions}
+                  className="px-2.5 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/20 text-[11px] flex items-center space-x-1 transition-colors"
                 >
-                  <RotateCcw className="w-3.5 h-3.5 text-purple-400" />
-                  <span>Exécuter un test d'intégrité à froid (Disaster Recovery Drill)</span>
+                  <LogOut className="w-3 h-3" />
+                  <span>Révoquer toutes les sessions</span>
                 </button>
-                {drillStatus && (
-                  <div className="mt-2 text-xs text-purple-300 font-mono p-2 rounded bg-purple-950/40 border border-purple-500/30 animate-pulse">
-                    {drillStatus}
+              )}
+            </div>
+
+            {isLoadingSessions ? (
+              <div className="py-8 text-center text-slate-400 flex items-center justify-center space-x-2">
+                <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
+                <span>Chargement des sessions...</span>
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-60 overflow-y-auto">
+                {sessions.map((ses) => {
+                  const ua = parseUserAgent(ses.userAgent);
+                  return (
+                    <div
+                      key={ses.id}
+                      className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between"
+                    >
+                      <div className="flex items-center space-x-3">
+                        <div className="p-2 rounded-lg bg-slate-900 text-slate-400">
+                          {ua.isMobile ? <Smartphone className="w-4 h-4" /> : <Laptop className="w-4 h-4" />}
+                        </div>
+                        <div>
+                          <div className="font-medium text-slate-200 flex items-center space-x-2">
+                            <span>
+                              {ua.device} — {ua.browser}
+                            </span>
+                            {ses.isCurrent && (
+                              <span className="text-[10px] px-2 py-0.2 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                                Session actuelle
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-slate-500 font-mono">
+                            IP : {ses.ipAddress || 'Inconnue'} • Dernière activité :{' '}
+                            {new Date(ses.lastActiveAt).toLocaleString('fr-FR')}
+                          </div>
+                        </div>
+                      </div>
+
+                      {!ses.isCurrent && (
+                        <button
+                          type="button"
+                          onClick={() => handleRevokeSession(ses.id)}
+                          className="px-2.5 py-1 rounded-lg text-rose-400 hover:bg-rose-500/10 border border-rose-500/20 text-[11px] transition-colors"
+                        >
+                          Révoquer
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+                {sessions.length === 0 && (
+                  <div className="py-6 text-center text-slate-500 border border-dashed border-slate-800 rounded-xl">
+                    Aucune session active trouvée.
                   </div>
                 )}
               </div>
-            </div>
+            )}
           </div>
         )}
 
-        {/* Tab 3: Active Sessions */}
-        {activeTab === 'sessions' && (
-          <div className="space-y-3 text-xs">
-            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
-              Appareils connectés à votre compte
-            </span>
-            <div className="space-y-2 max-h-60 overflow-y-auto">
-              {sessions.map((ses) => (
-                <div
-                  key={ses.id}
-                  className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between"
-                >
-                  <div className="flex items-center space-x-3">
-                    <div className="p-2 rounded-lg bg-slate-900 text-slate-400">
-                      {ses.device.includes('iPhone') ? <Smartphone className="w-4 h-4" /> : <Laptop className="w-4 h-4" />}
-                    </div>
-                    <div>
-                      <div className="font-medium text-slate-200 flex items-center space-x-2">
-                        <span>{ses.device}</span>
-                        {ses.isCurrent && (
-                          <span className="text-[10px] px-2 py-0.2 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                            Session actuelle
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-[10px] text-slate-500 font-mono">
-                        {ses.browser} • {ses.ipAddress} • {ses.lastActive}
-                      </div>
-                    </div>
-                  </div>
-
-                  {!ses.isCurrent && (
-                    <button
-                      onClick={() => handleRevokeSession(ses.id)}
-                      className="px-2.5 py-1 rounded-lg text-rose-400 hover:bg-rose-500/10 border border-rose-500/20 text-[11px] transition-colors"
-                    >
-                      Révoquer
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Tab 4: Danger Zone / Article 17 */}
+        {/* Tab 3: Danger Zone / Article 17 */}
         {activeTab === 'security' && (
           <div className="space-y-4 text-xs">
             <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 space-y-2">
@@ -305,11 +346,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <span>Droit à l'oubli & Suppression Définitive du Compte (Art. 17 RGPD)</span>
               </h4>
               <p className="text-[11px] text-rose-300/80 leading-relaxed">
-                Cette action est irréversible. L'ensemble de vos espaces documentaires isolés, fichiers et versions dans MinIO S3, dossiers, partages et identifiants seront définitivement purgés des bases de données.
+                Cette action est irréversible. L'ensemble de vos espaces documentaires isolés, fichiers et versions dans MinIO S3, dossiers, partages et identifiants seront définitivement purgés.
               </p>
 
               {!showDeleteConfirm ? (
                 <button
+                  type="button"
                   onClick={() => setShowDeleteConfirm(true)}
                   className="mt-2 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs transition-colors"
                 >
@@ -329,20 +371,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   />
                   <div className="flex justify-end space-x-2 pt-1">
                     <button
+                      type="button"
                       onClick={() => setShowDeleteConfirm(false)}
                       className="px-3 py-1 rounded bg-slate-800 text-slate-300"
                     >
                       Annuler
                     </button>
                     <button
-                      disabled={deleteInput !== 'SUPPRIMER'}
-                      onClick={() => {
-                        onDeleteAccount();
-                        onClose();
+                      type="button"
+                      disabled={deleteInput !== 'SUPPRIMER' || isDeleting}
+                      onClick={async () => {
+                        setIsDeleting(true);
+                        try {
+                          await onDeleteAccount();
+                          onClose();
+                        } finally {
+                          setIsDeleting(false);
+                        }
                       }}
                       className="px-3 py-1 rounded bg-rose-600 hover:bg-rose-500 text-white disabled:opacity-40 font-semibold"
                     >
-                      Confirmer la purge définitive
+                      {isDeleting ? 'Suppression...' : 'Confirmer la purge définitive'}
                     </button>
                   </div>
                 </div>
@@ -354,6 +403,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Footer */}
         <div className="flex justify-end pt-2 border-t border-slate-800">
           <button
+            type="button"
             onClick={onClose}
             className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-medium text-xs transition-colors"
           >

@@ -21,7 +21,7 @@ import pytest_asyncio
 import redis
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -386,13 +386,23 @@ async def test_phase10_admin_billing_notifications_patch_share_and_gdpr(
     hdr_owner = {"Authorization": f"Bearer {login_owner['access_token']}"}
     hdr_super = {"Authorization": f"Bearer {login_super['access_token']}"}
 
-    # Add editor to owner's tenant
+    # Temporarily upgrade to PERSONAL to invite collaborator, then restore FREE for 500MB quota tests
+    async with db_session_factory() as db:
+        await set_tenant_context(db, str(owner_tenant_id), is_superuser=True)
+        await db.execute(update(Tenant).where(Tenant.id == owner_tenant_id).values(plan_id="PERSONAL"))
+        await db.commit()
+
     inv = await pg_client.post(
         "/api/v1/tenants/current/members",
         json={"email": "p10_editor@example.com", "role": "EDITOR"},
         headers=hdr_owner,
     )
     assert inv.status_code == 201
+
+    async with db_session_factory() as db:
+        await set_tenant_context(db, str(owner_tenant_id), is_superuser=True)
+        await db.execute(update(Tenant).where(Tenant.id == owner_tenant_id).values(plan_id="FREE"))
+        await db.commit()
     hdr_editor_on_owner = {
         "Authorization": f"Bearer {login_editor['access_token']}",
         "X-Tenant-ID": str(owner_tenant_id),

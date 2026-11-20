@@ -22,6 +22,7 @@ class FolderRead(BaseModel):
     color: str
     is_favorite: bool
     is_trashed: bool
+    trashed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
@@ -54,6 +55,7 @@ class DocumentRead(BaseModel):
     antivirus_status: str
     is_favorite: bool
     is_trashed: bool
+    trashed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
@@ -97,3 +99,18 @@ class DocumentVersionRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class DocumentPreviewResponse(BaseModel):
+    document_id: UUID
+    original_name: str
+    mime_type: str
+    extension: str
+    size_bytes: int
+    mode: str  # 'text' | 'markdown' | 'csv' | 'svg' | 'binary_url' | 'unsupported'
+    text_content: Optional[str] = None
+    html_content: Optional[str] = None
+    svg_content: Optional[str] = None
+    csv_data: Optional[Dict[str, Any]] = None
+    download_url: Optional[str] = None
+    message: Optional[str] = None

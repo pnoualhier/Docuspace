@@ -6,7 +6,7 @@ from typing import AsyncGenerator
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -15,6 +15,7 @@ from backend.app.core.database import get_db, reset_tenant_context, set_tenant_c
 from backend.app.main import app
 from backend.app.models.document import Document, DocumentVersion, Folder
 from backend.app.models.plan import Plan
+from backend.app.models.tenant import Tenant
 from backend.app.models.user import User
 from backend.tests.pg_harness import PostgresHarness
 
@@ -172,6 +173,11 @@ async def test_phase9_pg_auth_sessions_refresh_rotation_and_rbac(pg_client: Asyn
     login_owner = (await pg_client.post("/api/v1/auth/login", json={"email": "rbac_owner@example.com", "password": "OwnerPassword!2026"})).json()
     owner_hdr = {"Authorization": f"Bearer {login_owner['access_token']}"}
     owner_tenant_id = login_owner["tenant_id"]
+
+    async with db_session_factory() as db:
+        await set_tenant_context(db, owner_tenant_id, is_superuser=True)
+        await db.execute(update(Tenant).where(Tenant.id == uuid.UUID(owner_tenant_id)).values(plan_id="PERSONAL"))
+        await db.commit()
 
     inv = await pg_client.post("/api/v1/tenants/current/members", json={"email": "rbac_viewer@example.com", "role": "VIEWER"}, headers=owner_hdr)
     assert inv.status_code == 201

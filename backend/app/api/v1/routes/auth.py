@@ -349,11 +349,13 @@ async def logout(
 
 @router.get("/sessions", response_model=List[SessionRead], tags=["Authentification"])
 async def list_active_sessions(
+    refresh_cookie: Optional[str] = Cookie(None, alias="refresh_token"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Lists all active login sessions for the authenticated user."""
     now = datetime.now(timezone.utc)
+    current_hash = hashlib.sha256(refresh_cookie.encode()).hexdigest() if refresh_cookie else None
     res = await db.execute(
         select(Session)
         .where(
@@ -363,7 +365,20 @@ async def list_active_sessions(
         )
         .order_by(Session.last_active_at.desc())
     )
-    return res.scalars().all()
+    sessions = res.scalars().all()
+    return [
+        SessionRead(
+            id=s.id,
+            user_agent=s.user_agent,
+            ip_address=s.ip_address,
+            is_revoked=s.is_revoked,
+            is_current=bool(current_hash and s.refresh_token_hash == current_hash),
+            expires_at=s.expires_at,
+            created_at=s.created_at,
+            last_active_at=s.last_active_at,
+        )
+        for s in sessions
+    ]
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Authentification"])
 async def revoke_session(

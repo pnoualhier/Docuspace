@@ -75,7 +75,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   ];
 
   const usedBytes = currentTenant.usedBytes || 0;
-  const maxBytes = currentPlan.maxStorageBytes;
+  const maxBytes = currentTenant.maxStorageBytes || currentPlan.maxStorageBytes || 1;
   const percentUsed = Math.min(100, Math.round((usedBytes / maxBytes) * 100));
 
   return (

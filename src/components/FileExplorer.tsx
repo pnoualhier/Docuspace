@@ -344,7 +344,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
                   className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium flex items-center space-x-1.5 transition-colors whitespace-nowrap"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>Télécharger (.ZIP)</span>
+                  <span>Télécharger</span>
                 </button>
                 {!isReadOnly && (
                   <button
@@ -577,12 +577,28 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
                           className={`flex items-center space-x-1 px-1.5 py-0.5 rounded text-[10px] font-medium border ${
                             doc.antivirusStatus === 'CLEAN'
                               ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                              : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+                              : doc.antivirusStatus === 'PENDING'
+                                ? 'bg-amber-500/10 text-amber-300 border-amber-500/20'
+                                : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
                           }`}
                           title={`ClamAV Status: ${doc.antivirusStatus}`}
                         >
-                          <ShieldCheck className="w-3 h-3 text-emerald-400" />
-                          <span>ClamAV Sain</span>
+                          {doc.antivirusStatus === 'CLEAN' ? (
+                            <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                          ) : doc.antivirusStatus === 'PENDING' ? (
+                            <Clock className="w-3 h-3 text-amber-400" />
+                          ) : (
+                            <ShieldAlert className="w-3 h-3 text-rose-400" />
+                          )}
+                          <span>
+                            {doc.antivirusStatus === 'CLEAN'
+                              ? 'ClamAV Sain'
+                              : doc.antivirusStatus === 'PENDING'
+                                ? 'Scan en attente'
+                                : doc.antivirusStatus === 'INFECTED'
+                                  ? 'Infecté'
+                                  : 'Erreur Scan'}
+                          </span>
                         </div>
                       </div>
 
@@ -779,9 +795,31 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({
                           {doc.sha256Hash.substring(0, 12)}...
                         </td>
                         <td className="p-3">
-                          <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                            <ShieldCheck className="w-3 h-3" />
-                            <span>Certifié ClamAV</span>
+                          <span
+                            className={`inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${
+                              doc.antivirusStatus === 'CLEAN'
+                                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                                : doc.antivirusStatus === 'PENDING'
+                                  ? 'bg-amber-500/10 text-amber-300 border-amber-500/20'
+                                  : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+                            }`}
+                          >
+                            {doc.antivirusStatus === 'CLEAN' ? (
+                              <ShieldCheck className="w-3 h-3" />
+                            ) : doc.antivirusStatus === 'PENDING' ? (
+                              <Clock className="w-3 h-3" />
+                            ) : (
+                              <ShieldAlert className="w-3 h-3" />
+                            )}
+                            <span>
+                              {doc.antivirusStatus === 'CLEAN'
+                                ? 'ClamAV Sain'
+                                : doc.antivirusStatus === 'PENDING'
+                                  ? 'Scan en attente'
+                                  : doc.antivirusStatus === 'INFECTED'
+                                    ? 'Infecté'
+                                    : 'Erreur Scan'}
+                            </span>
                           </span>
                         </td>
                         <td className="p-3 text-slate-400 text-[11px]">

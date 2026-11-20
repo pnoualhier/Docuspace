@@ -1,20 +1,15 @@
 import React from 'react';
-import { 
-  ShieldCheck, 
-  Search, 
-  Server, 
-  HardDrive, 
-  User as UserIcon, 
-  ChevronDown, 
-  LogOut, 
-  Shield, 
-  Layers, 
+import {
+  ShieldCheck,
+  Search,
+  Server,
+  HardDrive,
+  ChevronDown,
+  LogOut,
   CheckCircle2,
-  Sparkles,
-  HelpCircle,
-  ShieldAlert,
   Users,
-  Bell
+  Bell,
+  AlertCircle,
 } from 'lucide-react';
 import { User, Tenant, Plan } from '../types';
 import { formatBytes } from '../services/crypto';
@@ -27,15 +22,12 @@ interface HeaderProps {
   searchQuery: string;
   onSearchChange: (query: string) => void;
   onSelectTenant: (tenantId: string) => void;
-  onSwitchUser: (userId: string) => void;
   onOpenArchitecture: () => void;
   onOpenUpload: () => void;
-  onOpenSecuritySimulator: () => void;
   onOpenMembers: () => void;
   onOpenNotifications?: () => void;
   unreadNotificationsCount?: number;
   onLogout: () => void;
-  allUsers: User[];
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -46,22 +38,27 @@ export const Header: React.FC<HeaderProps> = ({
   searchQuery,
   onSearchChange,
   onSelectTenant,
-  onSwitchUser,
   onOpenArchitecture,
   onOpenUpload,
-  onOpenSecuritySimulator,
   onOpenMembers,
   onOpenNotifications,
   unreadNotificationsCount = 0,
   onLogout,
-  allUsers,
 }) => {
   const [showTenantDropdown, setShowTenantDropdown] = React.useState(false);
   const [showUserDropdown, setShowUserDropdown] = React.useState(false);
 
   const usedBytes = currentTenant.usedBytes || 0;
-  const maxBytes = currentPlan.maxStorageBytes;
+  const maxBytes = currentTenant.maxStorageBytes || currentPlan.maxStorageBytes || 1;
   const percentUsed = Math.min(100, Math.round((usedBytes / maxBytes) * 100));
+
+  const initials = currentUser.fullName
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((n) => n[0].toUpperCase())
+    .join('') || 'U';
 
   return (
     <header className="h-16 border-b border-slate-800 bg-slate-900/90 backdrop-blur-md px-6 flex items-center justify-between sticky top-0 z-30">
@@ -89,6 +86,7 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Multi-Tenant Selector */}
         <div className="relative">
           <button
+            type="button"
             onClick={() => {
               setShowTenantDropdown(!showTenantDropdown);
               setShowUserDropdown(false);
@@ -96,7 +94,7 @@ export const Header: React.FC<HeaderProps> = ({
             className="flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-800 border border-slate-700/80 text-xs text-slate-200 transition-colors shadow-sm"
             title="Espace documentaire actif (Isolation PostgreSQL RLS)"
           >
-            <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <div className="w-2 h-2 rounded-full bg-emerald-400" />
             <span className="font-medium max-w-[150px] truncate">{currentTenant.name}</span>
             <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-700 text-slate-300 font-mono">
               {currentTenant.role}
@@ -107,13 +105,14 @@ export const Header: React.FC<HeaderProps> = ({
           {showTenantDropdown && (
             <div className="absolute left-0 mt-2 w-64 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl p-2 z-50 animate-in fade-in zoom-in-95 duration-100">
               <div className="px-2 py-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center justify-between">
-                <span>Espaces isolés (RLS)</span>
-                <span className="text-[10px] text-blue-400 lowercase">pg_rls=enforced</span>
+                <span>Espaces autorisés</span>
+                <span className="text-[10px] text-blue-400">PostgreSQL RLS</span>
               </div>
               <div className="space-y-1 mt-1">
                 {userTenants.map((t) => (
                   <button
                     key={t.id}
+                    type="button"
                     onClick={() => {
                       onSelectTenant(t.id);
                       setShowTenantDropdown(false);
@@ -154,6 +153,7 @@ export const Header: React.FC<HeaderProps> = ({
           />
           {searchQuery && (
             <button
+              type="button"
               onClick={() => onSearchChange('')}
               className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white text-xs"
             >
@@ -163,10 +163,9 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* Right: Quota indicator, Architecture explorer & User profile */}
+      {/* Right: Quota indicator, Members, Architecture & User profile */}
       <div className="flex items-center space-x-4">
-        {/* Quota Mini Gauge */}
-        <div 
+        <div
           onClick={onOpenUpload}
           className="hidden md:flex items-center space-x-3 px-3 py-1.5 rounded-lg bg-slate-950/60 border border-slate-800 cursor-pointer hover:border-slate-700 transition-colors"
           title={`Stockage consommé : ${formatBytes(usedBytes)} sur ${formatBytes(maxBytes)}`}
@@ -179,7 +178,7 @@ export const Header: React.FC<HeaderProps> = ({
               <span className="text-slate-400">{formatBytes(maxBytes)}</span>
             </div>
             <div className="w-24 bg-slate-800 h-1.5 rounded-full overflow-hidden mt-0.5">
-              <div 
+              <div
                 className={`h-full rounded-full transition-all duration-500 ${
                   percentUsed > 90 ? 'bg-rose-500' : percentUsed > 70 ? 'bg-amber-400' : 'bg-blue-500'
                 }`}
@@ -189,18 +188,8 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
-        {/* Security & RLS Simulator button */}
         <button
-          onClick={onOpenSecuritySimulator}
-          className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-semibold transition-all shadow-sm"
-          title="Tester l'isolation RLS et simuler des attaques IDOR"
-        >
-          <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
-          <span className="hidden lg:inline">Simulateur RLS</span>
-        </button>
-
-        {/* Tenant Members RBAC button */}
-        <button
+          type="button"
           onClick={onOpenMembers}
           className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors"
           title="Gérer les membres et rôles RBAC de cet espace"
@@ -209,8 +198,8 @@ export const Header: React.FC<HeaderProps> = ({
           <span className="hidden xl:inline">Membres ({currentTenant.role})</span>
         </button>
 
-        {/* Architecture & API explorer button */}
         <button
+          type="button"
           onClick={onOpenArchitecture}
           className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-indigo-500/10 to-blue-500/10 hover:from-indigo-500/20 hover:to-blue-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-medium transition-all shadow-sm"
           title="Consulter l'architecture Docker, FastAPI, PostgreSQL et Alembic"
@@ -219,16 +208,16 @@ export const Header: React.FC<HeaderProps> = ({
           <span className="hidden sm:inline">Architecture & API</span>
         </button>
 
-        {/* Notifications Bell */}
         {onOpenNotifications && (
           <button
+            type="button"
             onClick={onOpenNotifications}
             className="relative p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
             title="Centre de notifications et alertes"
           >
             <Bell className="w-4 h-4" />
             {unreadNotificationsCount > 0 && (
-              <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-blue-600 text-white text-[10px] font-bold flex items-center justify-center ring-2 ring-slate-900 shadow-sm animate-pulse">
+              <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-blue-600 text-white text-[10px] font-bold flex items-center justify-center ring-2 ring-slate-900 shadow-sm">
                 {unreadNotificationsCount}
               </span>
             )}
@@ -238,6 +227,7 @@ export const Header: React.FC<HeaderProps> = ({
         {/* User profile dropdown */}
         <div className="relative">
           <button
+            type="button"
             onClick={() => {
               setShowUserDropdown(!showUserDropdown);
               setShowTenantDropdown(false);
@@ -245,7 +235,7 @@ export const Header: React.FC<HeaderProps> = ({
             className="flex items-center space-x-2.5 p-1 pl-2 rounded-xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700/80 transition-colors"
           >
             <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center text-white text-xs font-bold">
-              {currentUser.fullName.split(' ').map(n => n[0]).join('')}
+              {initials}
             </div>
             <div className="text-left hidden sm:block pr-1">
               <div className="text-xs font-medium text-slate-200 leading-tight">
@@ -263,10 +253,17 @@ export const Header: React.FC<HeaderProps> = ({
               <div className="p-2 border-b border-slate-800 mb-1">
                 <p className="text-xs font-semibold text-white">{currentUser.fullName}</p>
                 <p className="text-[11px] text-slate-400 truncate">{currentUser.email}</p>
-                <div className="mt-1 flex items-center space-x-1.5">
-                  <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                    Compte Vérifié
-                  </span>
+                <div className="mt-1.5 flex items-center flex-wrap gap-1.5">
+                  {currentUser.isVerified ? (
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                      Compte Vérifié
+                    </span>
+                  ) : (
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 inline-flex items-center space-x-1">
+                      <AlertCircle className="w-3 h-3" />
+                      <span>E-mail non vérifié</span>
+                    </span>
+                  )}
                   {currentUser.isSuperuser && (
                     <span className="text-[10px] px-2 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20 font-semibold">
                       Superadmin
@@ -275,35 +272,9 @@ export const Header: React.FC<HeaderProps> = ({
                 </div>
               </div>
 
-              {/* Demo user switcher */}
-              <div className="px-2 py-1 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-                Changer d'utilisateur (Test)
-              </div>
-              <div className="space-y-1 mb-2">
-                {allUsers.map((u) => (
-                  <button
-                    key={u.id}
-                    onClick={() => {
-                      onSwitchUser(u.id);
-                      setShowUserDropdown(false);
-                    }}
-                    className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between ${
-                      u.id === currentUser.id
-                        ? 'bg-blue-600/20 text-blue-300 font-medium'
-                        : 'text-slate-300 hover:bg-slate-800'
-                    }`}
-                  >
-                    <div className="truncate">
-                      <div>{u.fullName}</div>
-                      <div className="text-[10px] text-slate-500">{u.isSuperuser ? 'Administrateur' : 'Utilisateur'}</div>
-                    </div>
-                    {u.id === currentUser.id && <CheckCircle2 className="w-3.5 h-3.5 text-blue-400" />}
-                  </button>
-                ))}
-              </div>
-
-              <div className="border-t border-slate-800 pt-1">
+              <div className="pt-1">
                 <button
+                  type="button"
                   onClick={() => {
                     setShowUserDropdown(false);
                     onLogout();

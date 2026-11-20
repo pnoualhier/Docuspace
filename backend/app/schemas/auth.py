@@ -25,6 +25,7 @@ class SessionRead(BaseModel):
     user_agent: Optional[str] = None
     ip_address: Optional[str] = None
     is_revoked: bool
+    is_current: bool = False
     expires_at: datetime
     created_at: datetime
     last_active_at: datetime

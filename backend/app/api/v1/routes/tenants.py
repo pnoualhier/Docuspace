@@ -3,7 +3,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, Path
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 from backend.app.core.database import get_db
 from backend.app.models.tenant import Tenant, TenantMember, StorageUsage, Role
 from backend.app.models.plan import Plan
@@ -34,27 +34,46 @@ class MemberRead(BaseModel):
     role: str
     joined_at: str
 
+ALLOWED_INVITE_ROLES = {"EDITOR", "VIEWER", "GUEST"}
+
+
 @router.get("/my-tenants", response_model=List[TenantRead], tags=["Espaces & Tenants"])
 async def list_user_tenants(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Lists all tenants/workspaces accessible to the authenticated user."""
+    """Lists all tenants/workspaces accessible to the authenticated user with real PostgreSQL quota & plan state."""
     query = await db.execute(
-        select(Tenant, TenantMember.role)
+        select(Tenant, TenantMember.role, Plan, StorageUsage)
         .join(TenantMember, TenantMember.tenant_id == Tenant.id)
+        .outerjoin(Plan, Tenant.plan_id == Plan.id)
+        .outerjoin(StorageUsage, StorageUsage.tenant_id == Tenant.id)
         .where(TenantMember.user_id == current_user.id, Tenant.is_active == True)
     )
     results = []
-    for tenant, role in query.all():
+    for tenant, role, plan, storage in query.all():
+        max_bytes = plan.max_storage_bytes if plan else 524288000
+        used = storage.used_bytes if storage else 0
+        reserved = storage.reserved_bytes if storage else 0
+        doc_count = storage.document_count if storage else 0
         results.append(TenantRead(
             id=tenant.id,
             name=tenant.name,
             owner_id=tenant.owner_id,
             plan_id=tenant.plan_id,
             role=role,
+            subscription_status=tenant.subscription_status,
+            restricted_read_only=tenant.restricted_read_only,
             is_active=tenant.is_active,
-            created_at=tenant.created_at
+            created_at=tenant.created_at,
+            storage_usage=StorageUsageRead(
+                tenant_id=tenant.id,
+                used_bytes=used,
+                reserved_bytes=reserved,
+                document_count=doc_count,
+                max_storage_bytes=max_bytes,
+                percent_used=round((used / max_bytes) * 100, 2) if max_bytes > 0 else 0.0,
+            ),
         ))
     return results
 
@@ -80,6 +99,8 @@ async def get_current_tenant(
         owner_id=ctx.tenant.owner_id,
         plan_id=ctx.tenant.plan_id,
         role=ctx.role,
+        subscription_status=ctx.tenant.subscription_status,
+        restricted_read_only=ctx.tenant.restricted_read_only,
         is_active=ctx.tenant.is_active,
         created_at=ctx.tenant.created_at,
         storage_usage=StorageUsageRead(
@@ -119,7 +140,25 @@ async def invite_member(
     payload: MemberInviteRequest,
     ctx: TenantContext = Depends(require_permission(Permission.MEMBER_INVITE))
 ):
-    """Invites a user to the active tenant space with specified role."""
+    """Invites a user to the active tenant space with specified role and enforces plan member limits."""
+    normalized_role = payload.role.strip().upper()
+    if normalized_role not in ALLOWED_INVITE_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Rôle invalide pour une invitation. Rôles autorisés : EDITOR, VIEWER, GUEST."
+        )
+
+    plan = (await ctx.db.execute(select(Plan).where(Plan.id == ctx.tenant.plan_id))).scalar_one_or_none()
+    max_members = plan.max_members if plan else 1
+    current_count = (
+        await ctx.db.execute(select(func.count(TenantMember.id)).where(TenantMember.tenant_id == ctx.tenant.id))
+    ).scalar() or 0
+    if current_count >= max_members:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Limite de membres atteinte pour le forfait {ctx.tenant.plan_id} ({current_count}/{max_members} membres)."
+        )
+
     target_user_q = await ctx.db.execute(select(User).where(User.email == payload.email.lower()))
     target_user = target_user_q.scalar_one_or_none()
     if not target_user:
@@ -139,18 +178,18 @@ async def invite_member(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cet utilisateur est déjà membre de cet espace")
 
     # Verify role validity
-    role_check = await ctx.db.execute(select(Role).where(Role.name == payload.role.upper()))
+    role_check = await ctx.db.execute(select(Role).where(Role.name == normalized_role))
     if not role_check.scalar_one_or_none():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Rôle spécifié invalide")
 
     new_member = TenantMember(
         tenant_id=ctx.tenant.id,
         user_id=target_user.id,
-        role=payload.role.upper()
+        role=normalized_role
     )
     ctx.db.add(new_member)
     await ctx.db.commit()
-    return {"message": f"Utilisateur {target_user.email} invité avec succès avec le rôle {payload.role.upper()}"}
+    return {"message": f"Utilisateur {target_user.email} invité avec succès avec le rôle {normalized_role}"}
 
 @router.patch("/current/members/{user_id}", tags=["Espaces & Tenants"])
 async def update_member_role(
@@ -159,8 +198,13 @@ async def update_member_role(
     ctx: TenantContext = Depends(require_permission(Permission.MEMBER_MANAGE))
 ):
     """Updates a member's role in the active tenant."""
-    if user_id == ctx.tenant.owner_id and payload.role != "OWNER":
+    if not payload or not payload.role:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Le nouveau rôle est requis.")
+    normalized_role = payload.role.strip().upper()
+    if user_id == ctx.tenant.owner_id and normalized_role != "OWNER":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Impossible de révoquer le rôle du propriétaire initial.")
+    if user_id != ctx.tenant.owner_id and normalized_role not in ALLOWED_INVITE_ROLES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Rôle invalide. Rôles autorisés : EDITOR, VIEWER, GUEST.")
 
     member_q = await ctx.db.execute(
         select(TenantMember).where(TenantMember.tenant_id == ctx.tenant.id, TenantMember.user_id == user_id)
@@ -169,7 +213,7 @@ async def update_member_role(
     if not member:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Membre introuvable dans cet espace")
 
-    member.role = payload.role.upper()
+    member.role = normalized_role
     await ctx.db.commit()
     return {"message": f"Rôle mis à jour : {member.role}"}
 

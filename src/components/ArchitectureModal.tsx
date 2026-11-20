@@ -32,7 +32,7 @@ sudo apt update && sudo apt install -y curl docker.io docker-compose-plugin
 sudo systemctl enable --now docker
 
 # 2. Cloner et configurer DocuSpace
-git clone https://github.com/docuspace/docuspace.git /opt/docuspace
+git clone https://github.com/pnoualhier/Docuspace.git /opt/docuspace
 cd /opt/docuspace
 cp .env.example .env
 
@@ -75,7 +75,7 @@ docker compose exec backend alembic upgrade head`;
                 Architecture DocuSpace — Monolithe Modulaire Multi-Tenant
               </h3>
               <p className="text-[11px] text-slate-400">
-                Phase 1 : Docker Compose, FastAPI, PostgreSQL RLS, MinIO S3 & ClamAV
+                Stack Docker Compose, FastAPI, PostgreSQL RLS, MinIO S3 & ClamAV
               </p>
             </div>
           </div>

@@ -7,9 +7,9 @@ import io
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.database import get_db, set_tenant_context
@@ -81,6 +81,83 @@ async def get_admin_stats(
     }
 
 
+@router.get("/users")
+async def list_admin_users(
+    search: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    admin_user: User = Depends(require_superuser),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieve paginated platform users from PostgreSQL (superuser only)."""
+    stmt = select(User).order_by(User.created_at.desc())
+    count_stmt = select(func.count(User.id))
+    if search and search.strip():
+        q_like = f"%{search.strip().lower()}%"
+        cond = or_(func.lower(User.email).like(q_like), func.lower(User.full_name).like(q_like))
+        stmt = stmt.where(cond)
+        count_stmt = count_stmt.where(cond)
+
+    total = (await db.execute(count_stmt)).scalar() or 0
+    rows = (await db.execute(stmt.limit(limit).offset(offset))).scalars().all()
+    users = [
+        {
+            "id": str(u.id),
+            "email": u.email,
+            "full_name": u.full_name,
+            "is_active": u.is_active,
+            "is_verified": u.is_verified,
+            "is_superuser": u.is_superuser,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        }
+        for u in rows
+    ]
+    return {"users": users, "total": int(total), "limit": limit, "offset": offset}
+
+
+@router.get("/tenants")
+async def list_admin_tenants(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    admin_user: User = Depends(require_superuser),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieve paginated platform tenants with real quota usage and owner info (superuser only)."""
+    total = (await db.execute(select(func.count(Tenant.id)))).scalar() or 0
+    rows = (
+        await db.execute(
+            select(Tenant, Plan, StorageUsage, User.email)
+            .join(Plan, Tenant.plan_id == Plan.id)
+            .outerjoin(StorageUsage, StorageUsage.tenant_id == Tenant.id)
+            .outerjoin(User, Tenant.owner_id == User.id)
+            .order_by(Tenant.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+
+    tenants = [
+        {
+            "id": str(t.id),
+            "name": t.name,
+            "owner_id": str(t.owner_id),
+            "owner_email": owner_email,
+            "plan_id": t.plan_id,
+            "plan_name": p.name,
+            "subscription_status": t.subscription_status,
+            "restricted_read_only": t.restricted_read_only,
+            "is_active": t.is_active,
+            "used_bytes": int(su.used_bytes) if su else 0,
+            "reserved_bytes": int(su.reserved_bytes) if su else 0,
+            "document_count": int(su.document_count) if su else 0,
+            "max_storage_bytes": int(p.max_storage_bytes),
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+        }
+        for t, p, su, owner_email in rows
+    ]
+    return {"tenants": tenants, "total": int(total), "limit": limit, "offset": offset}
+
+
 @router.get("/audit-logs")
 async def get_audit_logs(
     format: str = Query("json", description="json or csv"),
@@ -125,6 +202,7 @@ async def get_audit_logs(
             "resource_id": str(log.resource_id) if log.resource_id else None,
             "details": log.details or {},
             "ip_address": log.ip_address,
+            "user_agent": log.user_agent,
         }
         for log, email in rows
     ]
@@ -148,6 +226,7 @@ async def get_audit_logs(
 @router.patch("/users/{target_user_id}/status")
 async def update_user_status(
     payload: UserStatusRequest,
+    request: Request,
     target_user_id: UUID = Path(...),
     admin_user: User = Depends(require_superuser),
     db: AsyncSession = Depends(get_db),
@@ -166,7 +245,9 @@ async def update_user_status(
         action="ADMIN_USER_STATUS_UPDATED",
         resource_type="USER",
         resource_id=target_user_id,
-        details={"is_active": payload.is_active},
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent", "")[:512] or None,
+        details={"is_active": payload.is_active, "target_email": user_row.email},
     ))
     await db.commit()
     return {"id": str(user_row.id), "is_active": user_row.is_active}
@@ -175,6 +256,7 @@ async def update_user_status(
 @router.patch("/tenants/{target_tenant_id}/plan")
 async def override_tenant_plan(
     payload: PlanOverrideRequest,
+    request: Request,
     target_tenant_id: UUID = Path(...),
     admin_user: User = Depends(require_superuser),
     db: AsyncSession = Depends(get_db),
@@ -197,6 +279,8 @@ async def override_tenant_plan(
         action="ADMIN_PLAN_OVERRIDE",
         resource_type="TENANT",
         resource_id=target_tenant_id,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent", "")[:512] or None,
         details={"old_plan": old_plan, "new_plan": plan_id},
     ))
     await db.commit()

@@ -5,7 +5,7 @@ Authenticated, tenant-scoped in-app notifications backed by PostgreSQL with Row-
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, select, update
 
@@ -122,6 +122,29 @@ async def mark_all_read(ctx: TenantContext = Depends(get_tenant_context)):
     )
     await ctx.db.commit()
     return {"success": True, "marked_count": res.rowcount or 0}
+
+
+@router.delete("/{notification_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_notification(
+    notification_id: UUID = Path(...),
+    ctx: TenantContext = Depends(get_tenant_context),
+):
+    """Delete a single notification belonging to the current tenant and user."""
+    notif = (
+        await ctx.db.execute(
+            select(Notification).where(
+                Notification.id == notification_id,
+                Notification.tenant_id == ctx.tenant.id,
+                Notification.user_id == ctx.user.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not notif:
+        raise HTTPException(status_code=404, detail="Notification introuvable")
+
+    await ctx.db.delete(notif)
+    await ctx.db.commit()
+    return None
 
 
 @router.post("/check-quota")

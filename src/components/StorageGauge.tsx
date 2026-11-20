@@ -1,24 +1,21 @@
 import React from 'react';
-import { 
-  HardDrive, 
-  FileText, 
-  Image as ImageIcon, 
-  FileSpreadsheet, 
-  FileArchive, 
-  FileCode, 
-  CheckCircle2, 
-  ShieldCheck, 
-  Zap, 
-  Sparkles,
-  AlertTriangle 
+import {
+  HardDrive,
+  FileText,
+  Image as ImageIcon,
+  FileSpreadsheet,
+  FileArchive,
+  FileCode,
+  CheckCircle2,
+  AlertTriangle,
 } from 'lucide-react';
 import { Tenant, Plan, DocumentItem, PlanType } from '../types';
 import { formatBytes, getFileCategory } from '../services/crypto';
-import { PLANS } from '../services/mockData';
 
 interface StorageGaugeProps {
   currentTenant: Tenant;
   currentPlan: Plan;
+  plans: Plan[];
   documents: DocumentItem[];
   onUpgradePlan: (planId: PlanType) => void;
 }
@@ -26,14 +23,14 @@ interface StorageGaugeProps {
 export const StorageGauge: React.FC<StorageGaugeProps> = ({
   currentTenant,
   currentPlan,
+  plans,
   documents,
   onUpgradePlan,
 }) => {
   const usedBytes = currentTenant.usedBytes || 0;
-  const maxBytes = currentPlan.maxStorageBytes;
+  const maxBytes = currentTenant.maxStorageBytes || currentPlan.maxStorageBytes || 1;
   const percentUsed = Math.min(100, Math.round((usedBytes / maxBytes) * 100));
 
-  // Compute breakdown by category
   const breakdown = {
     pdf: 0,
     image: 0,
@@ -43,14 +40,16 @@ export const StorageGauge: React.FC<StorageGaugeProps> = ({
     other: 0,
   };
 
-  documents.forEach((doc) => {
-    const cat = getFileCategory(doc.mimeType, doc.extension);
-    if (cat in breakdown) {
-      breakdown[cat as keyof typeof breakdown] += doc.sizeBytes;
-    } else {
-      breakdown.other += doc.sizeBytes;
-    }
-  });
+  documents
+    .filter((doc) => !doc.isTrashed)
+    .forEach((doc) => {
+      const cat = getFileCategory(doc.mimeType, doc.extension);
+      if (cat in breakdown) {
+        breakdown[cat as keyof typeof breakdown] += doc.sizeBytes;
+      } else {
+        breakdown.other += doc.sizeBytes;
+      }
+    });
 
   const categories = [
     { key: 'pdf', label: 'Documents PDF', bytes: breakdown.pdf, color: 'bg-rose-500', text: 'text-rose-400', icon: FileText },
@@ -61,14 +60,17 @@ export const StorageGauge: React.FC<StorageGaugeProps> = ({
     { key: 'other', label: 'Code & Fichiers divers', bytes: breakdown.other, color: 'bg-purple-500', text: 'text-purple-400', icon: FileCode },
   ];
 
+  const displayedPlans = plans.length > 0 ? plans : [currentPlan];
+
   return (
     <div className="flex-1 overflow-y-auto p-8 space-y-8 max-w-5xl mx-auto">
-      {/* Restricted Read-Only Grace Period Alert */}
       {currentTenant.isRestrictedReadOnly && (
         <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-start space-x-3 text-amber-200 text-xs animate-in fade-in">
           <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
           <div className="space-y-1">
-            <strong className="block text-amber-300 font-semibold">Espace restreint en lecture seule (Dépassement de quota) :</strong>
+            <strong className="block text-amber-300 font-semibold">
+              Espace restreint en lecture seule (Dépassement de quota) :
+            </strong>
             <p className="text-[11px] text-amber-200/90 leading-relaxed">
               Votre stockage utilisé ({formatBytes(usedBytes)}) dépasse la capacité de votre forfait ({formatBytes(maxBytes)}).
               Les ajouts de fichiers sont suspendus jusqu'à libération d'espace ou passage à une offre supérieure.
@@ -103,7 +105,6 @@ export const StorageGauge: React.FC<StorageGaugeProps> = ({
           </div>
         </div>
 
-        {/* Global Progress Bar with Category Stacks */}
         <div className="space-y-2">
           <div className="w-full h-3.5 bg-slate-800 rounded-full overflow-hidden flex p-0.5">
             {categories.map((cat) => {
@@ -127,7 +128,6 @@ export const StorageGauge: React.FC<StorageGaugeProps> = ({
           </div>
         </div>
 
-        {/* Category Breakdown Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-4 border-t border-slate-800/80">
           {categories.map((cat) => {
             const Icon = cat.icon;
@@ -151,23 +151,22 @@ export const StorageGauge: React.FC<StorageGaugeProps> = ({
         </div>
       </div>
 
-      {/* Subscription Plans Comparison */}
+      {/* Subscription Plans Comparison (loaded from /api/v1/billing/plans) */}
       <div className="space-y-4">
         <div>
           <h3 className="text-base font-bold text-white">Forfaits & Évolution de Stockage</h3>
           <p className="text-xs text-slate-400">
-            Passez à un forfait supérieur pour augmenter instantanément votre quota et vos versions de documents.
+            Offres tarifaires et plafonds de stockage issus du catalogue serveur PostgreSQL.
           </p>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {(Object.keys(PLANS) as PlanType[]).map((planKey) => {
-            const plan = PLANS[planKey];
-            const isCurrent = currentPlan.id === planKey;
+          {displayedPlans.map((plan) => {
+            const isCurrent = currentPlan.id === plan.id;
 
             return (
               <div
-                key={planKey}
+                key={plan.id}
                 className={`rounded-3xl p-6 border transition-all flex flex-col justify-between space-y-6 ${
                   isCurrent
                     ? 'bg-blue-950/20 border-blue-500/50 ring-1 ring-blue-500/40 shadow-lg shadow-blue-500/10'
@@ -207,8 +206,9 @@ export const StorageGauge: React.FC<StorageGaugeProps> = ({
 
                 <div>
                   <button
+                    type="button"
                     disabled={isCurrent}
-                    onClick={() => onUpgradePlan(planKey)}
+                    onClick={() => onUpgradePlan(plan.id)}
                     className={`w-full py-2.5 px-4 rounded-xl font-semibold text-xs transition-all ${
                       isCurrent
                         ? 'bg-slate-800 text-slate-400 cursor-default'
